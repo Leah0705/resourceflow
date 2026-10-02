@@ -1,10 +1,10 @@
 # resourceflow-cli
 
-ResourceFlow 的本地命令行客户端，使用后台 API Key 管理地点、资源和预约。
+A command-line client for ResourceFlow. It uses an admin API key to manage locations, resources and bookings.
 
-## 从当前代码运行
+## Run from source
 
-需要 Node.js 24。在本目录运行：
+Requires Node.js 24. In this folder, run:
 
 ```sh
 npm ci
@@ -13,25 +13,23 @@ node dist/index.js --help
 npm link
 ```
 
-连接当前实例：
+`npm link` puts the `resourceflow` command on your `PATH`. Connect it to an instance:
 
 ```sh
 resourceflow auth login
 resourceflow bookings list
 ```
 
-配置保存在 `~/.config/resourceflow/config.json`，也可使用 `RESOURCEFLOW_URL` 和 `RESOURCEFLOW_API_KEY` 环境变量。
+The profile is saved to `~/.config/resourceflow/config.json`. The `RESOURCEFLOW_URL` and `RESOURCEFLOW_API_KEY` environment variables override it.
 
 ## Docker
 
-当前客户端作为私有项目使用，镜像从当前代码构建：
+The client is not published as an image, so the image is built from the current source:
 
 ```sh
 docker build -t resourceflow-cli:local .
 docker run --rm -e RESOURCEFLOW_URL=https://booking.example.com -e RESOURCEFLOW_API_KEY=YOUR_KEY resourceflow-cli:local bookings list
 ```
-
-以下 API 用法保留内部字段、权限范围和预约状态值的兼容性。
 
 ## Set up an API key and log in
 
