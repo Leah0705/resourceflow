@@ -1,0 +1,34 @@
+/**
+ * Viewport breakpoints, in dp.
+ *
+ * These existed as bare numbers scattered across screens and drifted apart: the
+ * booking form and PageContainer split at 768 while the home page and the
+ * scroll-to-top FAB split at 700, so a 720px-wide window got the mobile
+ * container padding with a desktop hero. Import from here instead of writing a
+ * literal, and the whole app changes together.
+ */
+export const BREAKPOINTS = {
+  /**
+   * Phone-ish. Below this, side-by-side layouts stack and screens use their
+   * compact padding. Note that `Platform.OS === "web"` is true on a phone
+   * browser, so a layout that only makes sense on a real desktop must check
+   * width as well as (or instead of) platform.
+   */
+  mobile: 768,
+} as const;
+
+export const MOBILE_BREAKPOINT = BREAKPOINTS.mobile;
+
+/**
+ * Outer width of the app's content column, matching the navbar and footer, and the
+ * horizontal padding inside it. To line something up with the navbar's own contents
+ * (its logo, its overflow menu) rather than with the viewport edge, the target width is
+ * `Math.min(viewportWidth, CONTENT_MAX_WIDTH) - CONTENT_PADDING_H * 2` — the column
+ * tracks the viewport below its cap, and insets its contents either side.
+ */
+export const CONTENT_MAX_WIDTH = 1320;
+export const CONTENT_PADDING_H = 28;
+
+export function isMobileWidth(width: number): boolean {
+  return width < MOBILE_BREAKPOINT;
+}

@@ -1,0 +1,92 @@
+/**
+ * @jest-environment jsdom
+ */
+import React from "react";
+import { screen, fireEvent } from "@testing-library/react-native";
+import { parseLinkedText, LinkedText } from "@/components/common/LinkedText";
+import { renderWithProviders } from "@/tests/helpers/renderWithProviders";
+
+jest.mock("expo-router", () => ({
+  useRouter: jest.fn(() => ({ push: jest.fn(), replace: jest.fn(), back: jest.fn() })),
+  usePathname: jest.fn(() => "/"),
+}));
+
+describe("parseLinkedText", () => {
+  it("returns a single plain-text segment for text without links", () => {
+    expect(parseLinkedText("Hello world")).toEqual([{ text: "Hello world" }]);
+  });
+
+  it("parses a single inline link", () => {
+    expect(parseLinkedText("see [guide](https://e.com)")).toEqual([
+      { text: "see " },
+      { text: "guide", url: "https://e.com" },
+    ]);
+  });
+
+  it("parses multiple inline links", () => {
+    expect(parseLinkedText("[x](u1) and [y](u2)")).toEqual([
+      { text: "x", url: "u1" },
+      { text: " and " },
+      { text: "y", url: "u2" },
+    ]);
+  });
+
+  it("passes unmatched brackets through as plain text", () => {
+    expect(parseLinkedText("a [broken]( link")).toEqual([{ text: "a [broken]( link" }]);
+    expect(parseLinkedText("just [a bracket")).toEqual([{ text: "just [a bracket" }]);
+  });
+
+  it("handles an empty string", () => {
+    expect(parseLinkedText("")).toEqual([{ text: "" }]);
+  });
+
+  it("does not carry lastIndex state across calls (fresh regex per call)", () => {
+    // Calling twice must produce identical results — a stateful g-flag regex would drift.
+    expect(parseLinkedText("[a](b)")).toEqual([{ text: "a", url: "b" }]);
+    expect(parseLinkedText("[a](b)")).toEqual([{ text: "a", url: "b" }]);
+  });
+
+  it("preserves paragraph breaks (\\n\\n) within a single plain-text segment", () => {
+    // Multi-paragraph blurbs: the newline is emitted verbatim into the segment
+    // (RN <Text> renders \n as a real line break). No silent loss or merge.
+    expect(parseLinkedText("para one\n\npara two")).toEqual([{ text: "para one\n\npara two" }]);
+  });
+
+  it("handles mixed link/plain runs across line breaks", () => {
+    // A link in the first paragraph, plain text (with a line break) after.
+    expect(parseLinkedText("See [guide](https://e.com/m)\n\nOpen daily.")).toEqual([
+      { text: "See " },
+      { text: "guide", url: "https://e.com/m" },
+      { text: "\n\nOpen daily." },
+    ]);
+  });
+});
+
+describe("LinkedText component", () => {
+  it("renders plain text with no link affordance", () => {
+    renderWithProviders(<LinkedText text="Just plain copy." />);
+    expect(screen.getByText("Just plain copy.")).toBeTruthy();
+    expect(screen.queryByLabelText("http://anything")).toBeNull();
+  });
+
+  it("renders a tappable link for matched [label](url)", () => {
+    const { Linking } = require("react-native");
+    const openURLSpy = jest.spyOn(Linking, "openURL").mockResolvedValue(undefined as never);
+
+    renderWithProviders(<LinkedText text="See our [guide](https://example.com/guide)." />);
+
+    expect(screen.getByText("guide")).toBeTruthy();
+    // The Pressable carries the url as its accessibilityHint.
+    const link = screen.getByA11yHint("https://example.com/guide");
+    fireEvent.press(link);
+    expect(openURLSpy).toHaveBeenCalledWith("https://example.com/guide");
+    openURLSpy.mockRestore();
+  });
+
+  it("renders multiple links and text runs together", () => {
+    renderWithProviders(<LinkedText text="[guide](https://e.com/m) and [book](https://e.com/b)" />);
+    expect(screen.getByText("guide")).toBeTruthy();
+    expect(screen.getByText("book")).toBeTruthy();
+    expect(screen.getByText(" and ")).toBeTruthy();
+  });
+});

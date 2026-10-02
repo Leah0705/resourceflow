@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+#
+# seed-local.sh — seed the LOCAL DEV database with the ResourceFlow demo dataset.
+#
+# The dataset itself lives in scripts/demo_data.py (the single source of truth,
+# shared with purge-bookings.sh). This script only locates the database and
+# applies what the generator emits.
+#
+# AdminCredentials are wiped and re-seeded from demo_data.py's `accounts` section:
+# the Owner, using the Admin:Email/Admin:Password in appsettings.Development.json,
+# plus the demo Manager. So a reseed leaves you logged-in-able immediately, any user
+# invited through the Users card is gone, and both roles are there to click through.
+# They have to be re-seeded here rather than left to the API: login stopped creating
+# accounts when multi-user landed, and only startup bootstraps one, so a wiped table
+# under a running dev server would have nothing to log in to.
+#
+# Usage:
+#   bash scripts/seed-local.sh
+#   bash scripts/seed-local.sh --db /path/to/resourceflow.db
+#   bash scripts/seed-local.sh --config-only        # no bookings
+#   bash scripts/seed-local.sh --bookings-only      # leave config alone
+#   bash scripts/seed-local.sh --seed 42            # reproducible dataset
+#   bash scripts/seed-local.sh --keep-admin         # don't wipe AdminCredentials
+#   bash scripts/seed-local.sh --media-dir DIR      # where to look for artwork
+#   bash scripts/seed-local.sh --dry-run            # print the SQL, touch nothing
+#
+# Location images, the hero image and guide PDFs are linked from the files that
+# actually exist in the media directory (default ResourceFlowApi/wwwroot/media),
+# so anything uploaded through the admin UI survives a reseed.
+#
+# Any other flags are forwarded to demo_data.py, e.g.:
+#   bash scripts/seed-local.sh --days-forward 30 --occupancy 0.8
+#
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+GENERATOR="$SCRIPT_DIR/demo_data.py"
+
+LOG_TAG="seed-local"
+log() { printf '%s [%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$LOG_TAG" "$*" >&2; }
+die() { log "ERROR: $*"; exit 1; }
+
+# ── Args ─────────────────────────────────────────────────────────────────────
+DB_ARG=""
+SECTION="all"
+DRY_RUN=0
+KEEP_ADMIN=0
+MEDIA_DIR="$REPO_ROOT/ResourceFlowApi/wwwroot/media"
+GEN_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --db)            DB_ARG="${2:-}"; shift 2 ;;
+    --config-only)   SECTION="config"; shift ;;
+    --bookings-only) SECTION="bookings"; shift ;;
+    --media-dir)     MEDIA_DIR="${2:-}"; shift 2 ;;
+    --keep-admin)    KEEP_ADMIN=1; shift ;;
+    --dry-run)       DRY_RUN=1; shift ;;
+    -h|--help)       grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *)               GEN_ARGS+=("$1"); shift ;;
+  esac
+done
+
+# ── Tooling ──────────────────────────────────────────────────────────────────
+command -v python3 >/dev/null 2>&1 || die "python3 not found (needed to generate the dataset)."
+[[ -f "$GENERATOR" ]] || die "generator not found at $GENERATOR"
+
+# sqlite3 is optional: fall back to Python's bundled sqlite3 module.
+apply_sql() {
+  local db="$1"
+  if command -v sqlite3 >/dev/null 2>&1; then
+    sqlite3 "$db"
+  else
+    python3 -c '
+import sqlite3, sys
+db = sys.argv[1]
+con = sqlite3.connect(db)
+con.executescript(sys.stdin.read())
+con.commit()
+con.close()
+' "$db"
+  fi
+}
+
+query() {
+  local db="$1" sql="$2"
+  if command -v sqlite3 >/dev/null 2>&1; then
+    sqlite3 "$db" "$sql"
+  else
+    python3 -c '
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+print(con.execute(sys.argv[2]).fetchone()[0])
+' "$db" "$sql"
+  fi
+}
+
+# ── Find the DB ──────────────────────────────────────────────────────────────
+find_db() {
+  if [[ -n "$DB_ARG" ]]; then
+    [[ -f "$DB_ARG" ]] || die "--db path does not exist: $DB_ARG"
+    printf '%s\n' "$DB_ARG"; return
+  fi
+  if [[ -n "${RESOURCEFLOW_DB:-}" && -f "$RESOURCEFLOW_DB" ]]; then
+    printf '%s\n' "$RESOURCEFLOW_DB"; return
+  fi
+  local c
+  for c in \
+      "$REPO_ROOT/ResourceFlowApi/resourceflow.db" \
+      "$REPO_ROOT/resourceflow.db" \
+      "$REPO_ROOT/ResourceFlowApi/bin/Debug/net10.0/resourceflow.db"; do
+    if [[ -f "$c" ]]; then printf '%s\n' "$c"; return; fi
+  done
+  local found
+  found="$(find "$REPO_ROOT" -name 'resourceflow*.db' \
+            -not -path '*/node_modules/*' -not -path '*/.git/*' \
+            -not -path '*/data/*' 2>/dev/null | head -n1 || true)"
+  [[ -n "$found" ]] && { printf '%s\n' "$found"; return; }
+  return 1
+}
+
+# ── Generate ─────────────────────────────────────────────────────────────────
+SQL_FILE="$(mktemp -t seed-local.XXXXXX.sql)"
+# The generator wraps each section in its own BEGIN/COMMIT, so accounts go in a second
+# file rather than being appended into the first (which would nest transactions).
+ACCOUNTS_SQL_FILE="$(mktemp -t seed-local-accounts.XXXXXX.sql)"
+trap 'rm -f "$SQL_FILE" "$ACCOUNTS_SQL_FILE"' EXIT
+
+# Location images and the hero are linked from whatever is actually in the
+# media directory, so an image uploaded through the admin UI survives a reseed.
+MEDIA_ARGS=()
+if [[ "$SECTION" != "bookings" && -d "$MEDIA_DIR" ]]; then
+  MEDIA_ARGS=(--media-dir "$MEDIA_DIR")
+fi
+
+python3 "$GENERATOR" "$SECTION" "${MEDIA_ARGS[@]+"${MEDIA_ARGS[@]}"}" "${GEN_ARGS[@]+"${GEN_ARGS[@]}"}" > "$SQL_FILE"
+
+# Replace the accounts with the curated pair the generator defines. The password comes from
+# the same appsettings the API bootstraps from, so the configured login works right after a
+# reseed — it has to happen here, because login stopped creating accounts and only startup
+# bootstraps one.
+SEED_ACCOUNTS=0
+if [[ $KEEP_ADMIN -eq 0 && "$SECTION" != "bookings" ]]; then
+  python3 "$GENERATOR" accounts \
+    --settings-file "$REPO_ROOT/ResourceFlowApi/appsettings.Development.json" > "$ACCOUNTS_SQL_FILE" \
+    || die "could not generate admin accounts — set Admin:Password in appsettings.Development.json, or pass --keep-admin."
+  SEED_ACCOUNTS=1
+fi
+
+if [[ $DRY_RUN -eq 1 ]]; then
+  log "DRY RUN — emitting SQL to stdout, database untouched."
+  cat "$SQL_FILE"
+  if [[ $SEED_ACCOUNTS -eq 1 ]]; then cat "$ACCOUNTS_SQL_FILE"; fi
+  exit 0
+fi
+
+DB="$(find_db)" || die "Could not find resourceflow.db. Pass --db PATH or set RESOURCEFLOW_DB, or run the API once first."
+
+if [[ -z "$(query "$DB" "SELECT name FROM sqlite_master WHERE type='table' AND name='Venues';")" ]]; then
+  die "Venues table missing in $DB — run the API once so EF migrations create the schema."
+fi
+
+log "DB:      $DB"
+log "Section: $SECTION"
+
+apply_sql "$DB" < "$SQL_FILE"
+if [[ $SEED_ACCOUNTS -eq 1 ]]; then apply_sql "$DB" < "$ACCOUNTS_SQL_FILE"; fi
+
+# ── Summary ──────────────────────────────────────────────────────────────────
+log "Done. Row counts:"
+for t in Venues Sections Resources ResourceGroups Highlights SocialLinks BrandSettings Bookings WaitlistEntries AdminNotifications AdminCredentials; do
+  log "  $t: $(query "$DB" "SELECT COUNT(*) FROM $t;")"
+done

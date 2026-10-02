@@ -1,0 +1,238 @@
+import React from "react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react-native";
+import WaitlistTicket from "@/components/waitlist/WaitlistTicket";
+import { WAITLIST_POLL_MS, useWaitlistEntry } from "@/components/waitlist/useWaitlistEntry";
+import { getWaitlistStatus, leaveWaitlist, type WaitlistEntryStatus } from "@/api/waitlist";
+import haptics from "@/utils/haptics";
+
+jest.mock("@expo/vector-icons", () => ({ Ionicons: () => null }));
+jest.mock("@/hooks/use-color-scheme", () => ({ useColorScheme: () => "light" }));
+jest.mock("@/context/BrandContext", () => ({
+  useBrand: () => ({ primaryColor: "#0a7ea4", appName: "ResourceFlow" }),
+}));
+jest.mock("@/api/waitlist", () => ({
+  getWaitlistStatus: jest.fn(),
+  leaveWaitlist: jest.fn(),
+}));
+jest.mock("@/utils/haptics", () => {
+  const mock = { outcome: jest.fn(), press: jest.fn() };
+  return { __esModule: true, default: mock, haptics: mock };
+});
+jest.mock("@/components/common/ConfirmModal", () => require("../../../jest-mocks/ConfirmModal"));
+
+const mockStatus = getWaitlistStatus as jest.Mock;
+const mockLeave = leaveWaitlist as jest.Mock;
+
+const entry = (over: Partial<WaitlistEntryStatus> = {}): WaitlistEntryStatus => ({
+  ref: "abc",
+  number: 12,
+  venueId: 3,
+  venueName: "Harbour Studio",
+  name: "Ada",
+  partySize: 2,
+  status: "waiting",
+  partiesAhead: 2,
+  estimatedWaitMinutes: 25,
+  joinedAt: "2026-09-26T19:00:00Z",
+  notifiedAt: null,
+  pushEnabled: false,
+  ...over,
+});
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  jest.useFakeTimers();
+});
+
+afterEach(() => jest.useRealTimers());
+
+async function advance(ms: number) {
+  await act(async () => {
+    jest.advanceTimersByTime(ms);
+  });
+}
+
+/** The card as both the Locations drawer and My Bookings mount it: over the entry's own hook. */
+function Ticket({ entryRef }: { entryRef: string }) {
+  return <WaitlistTicket state={useWaitlistEntry(entryRef)} />;
+}
+
+describe("WaitlistTicket", () => {
+  it("shows the participant's ticket, place and wait", async () => {
+    mockStatus.mockResolvedValue(entry());
+    render(<Ticket entryRef="abc" />);
+
+    expect(await screen.findByText("You're on the list")).toBeTruthy();
+    expect(screen.getByText("Harbour Studio")).toBeTruthy();
+    expect(screen.getByText("2 groups ahead of you")).toBeTruthy();
+    expect(screen.getByText("#12")).toBeTruthy();
+    expect(screen.getByText("25 min")).toBeTruthy();
+  });
+
+  it("tells a participant who opted in to push that a notification is coming", async () => {
+    mockStatus.mockResolvedValue(entry({ pushEnabled: true }));
+    render(<Ticket entryRef="abc" />);
+
+    expect(await screen.findByText(/You'll get a notification/)).toBeTruthy();
+  });
+
+  it("gives a participant without push no line about notifications", async () => {
+    mockStatus.mockResolvedValue(entry());
+    render(<Ticket entryRef="abc" />);
+    await screen.findByText("You're on the list");
+
+    expect(screen.queryByText(/notification/)).toBeNull();
+  });
+
+  it("says the participant is next with nobody ahead", async () => {
+    mockStatus.mockResolvedValue(entry({ partiesAhead: 0, estimatedWaitMinutes: 0 }));
+    render(<Ticket entryRef="abc" />);
+
+    expect(await screen.findByText("You're next")).toBeTruthy();
+    expect(screen.getByText("Now")).toBeTruthy();
+  });
+
+  it("re-reads the place while queued, and buzzes once when the party is called", async () => {
+    mockStatus
+      .mockResolvedValueOnce(entry())
+      .mockResolvedValueOnce(entry({ status: "notified" }))
+      .mockResolvedValue(entry({ status: "notified" }));
+    render(<Ticket entryRef="abc" />);
+    await screen.findByText("You're on the list");
+
+    await advance(WAITLIST_POLL_MS);
+    expect(await screen.findByText("Your resource is ready")).toBeTruthy();
+    expect(screen.getByText("Please head to the front desk.")).toBeTruthy();
+
+    await advance(WAITLIST_POLL_MS);
+    expect(mockStatus).toHaveBeenCalledTimes(3);
+    expect(haptics.outcome).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops polling once the entry has left the queue", async () => {
+    mockStatus.mockResolvedValue(entry({ status: "inUse", partiesAhead: null }));
+    render(<Ticket entryRef="abc" />);
+    await screen.findByText("Enjoy your session");
+
+    await advance(WAITLIST_POLL_MS * 3);
+
+    expect(mockStatus).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId("waitlist-leave")).toBeNull();
+  });
+
+  it("shows when a closed ticket joined in place of the wait", async () => {
+    mockStatus.mockResolvedValue(entry({ status: "inUse", partiesAhead: null }));
+    render(<Ticket entryRef="abc" />);
+    await screen.findByText("Enjoy your session");
+
+    expect(screen.getByText("Joined")).toBeTruthy();
+    expect(screen.queryByText("Wait")).toBeNull();
+  });
+
+  it("marks a wait no resource can fit rather than guessing one", async () => {
+    mockStatus.mockResolvedValue(entry({ estimatedWaitMinutes: null }));
+    render(<Ticket entryRef="abc" />);
+
+    expect(await screen.findByText("No resource fits a group that size")).toBeTruthy();
+  });
+
+  it.each([
+    ["left", "You've left the waitlist"],
+    ["expired", "This waitlist entry has expired"],
+  ] as const)("titles a %s entry", async (status, title) => {
+    mockStatus.mockResolvedValue(entry({ status }));
+    render(<Ticket entryRef="abc" />);
+
+    expect(await screen.findByText(title)).toBeTruthy();
+  });
+
+  it("says so for an unknown ref", async () => {
+    mockStatus.mockResolvedValue(null);
+    render(<Ticket entryRef="nope" />);
+
+    expect(await screen.findByTestId("waitlist-not-found")).toBeTruthy();
+  });
+
+  it("reports a first load that failed", async () => {
+    mockStatus.mockResolvedValue(undefined);
+    render(<Ticket entryRef="abc" />);
+
+    expect(await screen.findByText("Couldn't load the waitlist. Please try again.")).toBeTruthy();
+  });
+
+  it("keeps the last place shown when a refresh fails", async () => {
+    mockStatus.mockResolvedValueOnce(entry()).mockResolvedValue(undefined);
+    render(<Ticket entryRef="abc" />);
+    await screen.findByText("You're on the list");
+
+    await advance(WAITLIST_POLL_MS);
+
+    expect(await screen.findByText("Couldn't refresh your place in line.")).toBeTruthy();
+    expect(screen.getByText("You're on the list")).toBeTruthy();
+  });
+
+  it("leaves the waitlist once confirmed", async () => {
+    mockStatus.mockResolvedValueOnce(entry()).mockResolvedValue(entry({ status: "left" }));
+    mockLeave.mockResolvedValue(true);
+    render(<Ticket entryRef="abc" />);
+    await screen.findByText("You're on the list");
+
+    fireEvent.press(screen.getByTestId("waitlist-leave"));
+    expect(
+      screen.getByText(
+        "Are you sure you want to leave the waitlist? You'll lose your place in line."
+      )
+    ).toBeTruthy();
+    expect(mockLeave).not.toHaveBeenCalled();
+
+    fireEvent.press(screen.getByText("Leave Waitlist"));
+
+    expect(await screen.findByText("You've left the waitlist")).toBeTruthy();
+    expect(mockLeave).toHaveBeenCalledWith("abc");
+    expect(screen.queryByTestId("confirm-modal")).toBeNull();
+  });
+
+  it("keeps the confirmation up, saying so, while the leave is in flight", async () => {
+    mockStatus.mockResolvedValue(entry());
+    let finish: (ok: boolean) => void = () => {};
+    mockLeave.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+    render(<Ticket entryRef="abc" />);
+    await screen.findByText("You're on the list");
+
+    fireEvent.press(screen.getByTestId("waitlist-leave"));
+    fireEvent.press(screen.getByText("Leave Waitlist"));
+
+    expect(await screen.findByText("Leaving…")).toBeTruthy();
+    fireEvent.press(screen.getByText("Stay in Line"));
+    expect(screen.getByTestId("confirm-modal")).toBeTruthy();
+
+    await act(async () => finish(true));
+    expect(screen.queryByTestId("confirm-modal")).toBeNull();
+  });
+
+  it("stays put when the participant backs out of leaving", async () => {
+    mockStatus.mockResolvedValue(entry());
+    render(<Ticket entryRef="abc" />);
+    await screen.findByText("You're on the list");
+
+    fireEvent.press(screen.getByTestId("waitlist-leave"));
+    fireEvent.press(screen.getByText("Stay in Line"));
+
+    await waitFor(() => expect(screen.queryByTestId("confirm-modal")).toBeNull());
+    expect(mockLeave).not.toHaveBeenCalled();
+    expect(screen.getByText("You're on the list")).toBeTruthy();
+  });
+
+  it("says so when leaving fails", async () => {
+    mockStatus.mockResolvedValue(entry());
+    mockLeave.mockResolvedValue(false);
+    render(<Ticket entryRef="abc" />);
+    await screen.findByText("You're on the list");
+
+    fireEvent.press(screen.getByTestId("waitlist-leave"));
+    fireEvent.press(screen.getByText("Leave Waitlist"));
+
+    expect(await screen.findByText("Couldn't leave the waitlist. Please try again.")).toBeTruthy();
+    expect(screen.queryByTestId("confirm-modal")).toBeNull();
+  });
+});

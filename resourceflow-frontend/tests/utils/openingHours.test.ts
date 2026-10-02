@@ -1,0 +1,167 @@
+import {
+  getHoursForDay,
+  getHoursForDate,
+  getIsoDayFromDateString,
+  getNextOpening,
+  hasCustomHours,
+  isoDayShortName,
+  parseOpenDays,
+  summarizeHours,
+} from "@/utils/openingHours";
+
+const uniformVenue = {
+  openTime: "09:00",
+  closeTime: "22:00",
+  openHours: [1, 2, 3, 4, 5, 6, 7].map((day) => ({ day, open: "09:00", close: "22:00" })),
+};
+
+const customVenue = {
+  openTime: "09:00",
+  closeTime: "22:00",
+  openHours: [
+    { day: 1, open: "09:00", close: "22:00" },
+    { day: 2, open: "09:00", close: "22:00" },
+    { day: 3, open: "09:00", close: "22:00" },
+    { day: 4, open: "09:00", close: "22:00" },
+    { day: 5, open: "09:00", close: "23:00" },
+    { day: 6, open: "11:00", close: "23:30" },
+    { day: 7, open: "12:00", close: "16:00" },
+  ],
+};
+
+describe("getHoursForDay", () => {
+  it("returns the per-day entry when present", () => {
+    expect(getHoursForDay(customVenue, 6)).toEqual({ open: "11:00", close: "23:30" });
+  });
+
+  it("falls back to openTime/closeTime when openHours is missing", () => {
+    expect(getHoursForDay({ openTime: "10:00", closeTime: "20:00" }, 3)).toEqual({
+      open: "10:00",
+      close: "20:00",
+    });
+  });
+
+  it("falls back to defaults when nothing is set", () => {
+    expect(getHoursForDay({}, 1)).toEqual({ open: "09:00", close: "22:00" });
+  });
+
+  it("falls back for a day missing from openHours", () => {
+    const partial = {
+      openTime: "08:00",
+      closeTime: "18:00",
+      openHours: [{ day: 6, open: "11:00", close: "23:00" }],
+    };
+    expect(getHoursForDay(partial, 2)).toEqual({ open: "08:00", close: "18:00" });
+  });
+});
+
+describe("getIsoDayFromDateString", () => {
+  it("maps Monday to 1", () => {
+    expect(getIsoDayFromDateString("2026-06-01")).toBe(1);
+  });
+
+  it("maps Sunday to 7", () => {
+    expect(getIsoDayFromDateString("2026-06-07")).toBe(7);
+  });
+
+  it("maps Saturday to 6", () => {
+    expect(getIsoDayFromDateString("2026-10-10")).toBe(6);
+  });
+});
+
+describe("getHoursForDate", () => {
+  it("resolves hours via the date's day of week", () => {
+    expect(getHoursForDate(customVenue, "2026-10-10")).toEqual({
+      open: "11:00",
+      close: "23:30",
+    });
+  });
+});
+
+describe("parseOpenDays", () => {
+  it("parses a comma-separated list", () => {
+    expect(parseOpenDays("1,2,3")).toEqual([1, 2, 3]);
+  });
+
+  it("ignores out-of-range values", () => {
+    expect(parseOpenDays("0,1,8,7")).toEqual([1, 7]);
+  });
+
+  it("returns all days for empty or missing input", () => {
+    expect(parseOpenDays(undefined)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(parseOpenDays("")).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(parseOpenDays("nope")).toEqual([1, 2, 3, 4, 5, 6, 7]);
+  });
+});
+
+describe("hasCustomHours", () => {
+  it("is false when hours are uniform", () => {
+    expect(hasCustomHours(uniformVenue)).toBe(false);
+  });
+
+  it("is true when any day differs", () => {
+    expect(hasCustomHours(customVenue)).toBe(true);
+  });
+
+  it("is false when openHours is missing or empty", () => {
+    expect(hasCustomHours({})).toBe(false);
+    expect(hasCustomHours({ openHours: [] })).toBe(false);
+  });
+});
+
+describe("summarizeHours", () => {
+  it("returns the single range for uniform hours", () => {
+    expect(summarizeHours(uniformVenue)).toBe("09:00–22:00");
+  });
+
+  it("returns a varies hint for custom hours without a day", () => {
+    expect(summarizeHours(customVenue)).toBe("Varies by day");
+  });
+
+  it("returns the day's hours when a day is given", () => {
+    expect(summarizeHours(customVenue, 7)).toBe("12:00–16:00 today");
+  });
+});
+
+describe("isoDayShortName", () => {
+  it("names each ISO day", () => {
+    expect(isoDayShortName(1)).toBe("Mon");
+    expect(isoDayShortName(7)).toBe("Sun");
+  });
+
+  it("returns an empty string for a day outside 1-7", () => {
+    expect(isoDayShortName(0)).toBe("");
+    expect(isoDayShortName(8)).toBe("");
+  });
+});
+
+describe("getNextOpening", () => {
+  const hours = {
+    openTime: "09:00",
+    closeTime: "22:00",
+    openHours: [
+      { day: 1, open: "09:00", close: "22:00" },
+      { day: 5, open: "08:00", close: "23:00" },
+    ],
+  };
+
+  it("finds the next open day after the given one", () => {
+    expect(getNextOpening(hours, 4, [1, 5])).toEqual({ isoDay: 5, open: "08:00" });
+  });
+
+  it("wraps around the week rather than stopping at Sunday", () => {
+    expect(getNextOpening(hours, 6, [1, 5])).toEqual({ isoDay: 1, open: "09:00" });
+  });
+
+  it("skips the day it starts from, so a weekly-only opening points at next week", () => {
+    expect(getNextOpening(hours, 5, [5])).toEqual({ isoDay: 5, open: "08:00" });
+  });
+
+  it("returns null when the location never opens", () => {
+    expect(getNextOpening(hours, 3, [])).toBeNull();
+  });
+
+  it("falls back to the uniform hours for a day with no per-day entry", () => {
+    expect(getNextOpening(hours, 1, [3])).toEqual({ isoDay: 3, open: "09:00" });
+  });
+});

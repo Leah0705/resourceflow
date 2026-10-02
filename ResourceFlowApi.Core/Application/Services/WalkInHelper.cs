@@ -1,0 +1,63 @@
+using System.Globalization;
+using ResourceFlowApi.Core.Application.Exceptions;
+using ResourceFlowApi.Core.Application.Utilities;
+using ResourceFlowApi.Core.Domain;
+
+namespace ResourceFlowApi.Core.Application.Services;
+
+/// <summary>
+/// Resolves a venue's walk-in policy. A location is walk-in only either
+/// globally (<see cref="Venue.WalkInOnly"/>) or on specific ISO days
+/// listed in <see cref="Venue.WalkInDays"/> (1=Monday … 7=Sunday).
+/// Walk-in-only means the location stays publicly listed but online bookings
+/// and resource holds are rejected.
+/// </summary>
+public static class WalkInHelper
+{
+    public static HashSet<int> ParseWalkInDays(string? walkInDays) => IsoDay.ParseList(walkInDays);
+
+    /// <summary>True when the venue does not take bookings on the given ISO day.</summary>
+    public static bool IsWalkInOnlyOn(Venue venue, int isoDay)
+        => venue.WalkInOnly || ParseWalkInDays(venue.WalkInDays).Contains(isoDay);
+
+    /// <summary>True when the venue does not take bookings at the given UTC instant.</summary>
+    public static bool IsWalkInOnlyAt(Venue venue, DateTime utc)
+    {
+        if (venue.WalkInOnly)
+        {
+            return true;
+        }
+
+        HashSet<int> days = ParseWalkInDays(venue.WalkInDays);
+        if (days.Count == 0)
+        {
+            return false;
+        }
+
+        DateTime local = TimeZoneHelper.ConvertUtcToLocal(utc, venue.Timezone);
+        return days.Contains(IsoDay.Of(local));
+    }
+
+    /// <summary>
+    /// Validates a WalkInDays update value and returns the normalized
+    /// comma-separated string (or null when no days are listed).
+    /// </summary>
+    /// <exception cref="ArgumentException">Thrown for entries outside 1–7.</exception>
+    public static string? NormalizeWalkInDays(string walkInDays)
+    {
+        var days = new SortedSet<int>();
+        foreach (string part in walkInDays.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (!int.TryParse(part, out int day) || day < 1 || day > 7)
+            {
+                throw new ValidationException("WalkInDays must be a comma-separated list of ISO day numbers 1 (Monday) through 7 (Sunday).") { Code = ErrorCodes.VenueWalkInDaysInvalid };
+            }
+
+            days.Add(day);
+        }
+
+        return days.Count == 0
+            ? null
+            : string.Join(",", days.Select(d => d.ToString(CultureInfo.InvariantCulture)));
+    }
+}

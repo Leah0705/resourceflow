@@ -1,0 +1,441 @@
+import React from "react";
+import { render, screen, fireEvent, waitFor, act } from "@testing-library/react-native";
+import { HighlightsCard } from "@/components/admin/settings/HighlightsCard";
+import * as adminApi from "@/api/admin";
+
+jest.mock("@expo/vector-icons", () => ({
+  Ionicons: () => null,
+}));
+
+jest.mock("@/api/admin", () => ({
+  adminGetHighlights: jest.fn(),
+  adminCreateHighlight: jest.fn(),
+  adminUpdateHighlight: jest.fn(),
+  adminDeleteHighlight: jest.fn(),
+  saveBrandSettings: jest.fn(),
+}));
+
+let mockBrandData: {
+  primaryColor: string;
+  appName: string;
+  highlightsHeading?: string;
+  highlightsSubheading?: string;
+} = { primaryColor: "#0a7ea4", appName: "ResourceFlow" };
+
+jest.mock("@/context/BrandContext", () => ({
+  useBrand: () => mockBrandData,
+}));
+
+jest.mock("@/hooks/use-color-scheme", () => ({
+  useColorScheme: () => "light",
+}));
+
+jest.mock("@/hooks/use-persisted-state", () => ({
+  usePersistedState: (_key: string, defaultValue: unknown) => {
+    const { useState } = require("react");
+    return useState(defaultValue);
+  },
+}));
+
+const baseProps = {
+  borderColor: "#ddd",
+  mutedColor: "#888",
+  cardBg: "#fff",
+};
+
+const mockHighlights = [
+  {
+    id: 1,
+    title: "Great Rooms",
+    body: "Every room is ready when you arrive",
+    iconKey: "star-outline",
+    sortOrder: 0,
+  },
+  {
+    id: 2,
+    title: "Live Music",
+    body: "Every Friday",
+    iconKey: "musical-notes-outline",
+    sortOrder: 1,
+  },
+];
+
+describe("HighlightsCard", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockBrandData = { primaryColor: "#0a7ea4", appName: "ResourceFlow" };
+    (adminApi.adminGetHighlights as jest.Mock).mockResolvedValue([]);
+  });
+
+  it("renders Highlights title", async () => {
+    render(<HighlightsCard {...baseProps} />);
+    await waitFor(() => {
+      expect(screen.getByText("Highlights")).toBeTruthy();
+    });
+  });
+
+  it("renders expanded by default (Add button visible)", async () => {
+    render(<HighlightsCard {...baseProps} />);
+    await waitFor(() => expect(screen.getByText("Add")).toBeTruthy());
+  });
+
+  it("collapses when header is pressed", async () => {
+    render(<HighlightsCard {...baseProps} />);
+    await waitFor(() => expect(screen.getByText("Add")).toBeTruthy());
+    fireEvent.press(screen.getByText("Highlights"));
+    await waitFor(() => {
+      expect(screen.queryByText("Add")).toBeNull();
+    });
+  });
+
+  it("expands again when header is pressed after collapse", async () => {
+    render(<HighlightsCard {...baseProps} />);
+    await waitFor(() => expect(screen.getByText("Add")).toBeTruthy());
+    fireEvent.press(screen.getByText("Highlights"));
+    await waitFor(() => expect(screen.queryByText("Add")).toBeNull());
+    fireEvent.press(screen.getByText("Highlights"));
+    await waitFor(() => {
+      expect(screen.getByText("Add")).toBeTruthy();
+    });
+  });
+
+  it("shows Add button when expanded", async () => {
+    render(<HighlightsCard {...baseProps} />);
+    await waitFor(() => {
+      expect(screen.getByText("Add")).toBeTruthy();
+    });
+  });
+
+  it("shows empty state when no highlights", async () => {
+    render(<HighlightsCard {...baseProps} />);
+    await waitFor(() => {
+      expect(screen.getByText(/No highlights yet/)).toBeTruthy();
+    });
+  });
+
+  it("shows highlights list when highlights are loaded", async () => {
+    (adminApi.adminGetHighlights as jest.Mock).mockResolvedValue(mockHighlights);
+    render(<HighlightsCard {...baseProps} />);
+    await waitFor(() => {
+      expect(screen.getByText("Great Rooms")).toBeTruthy();
+      expect(screen.getByText("Live Music")).toBeTruthy();
+    });
+  });
+
+  it("shows highlight count in subtitle when loaded", async () => {
+    (adminApi.adminGetHighlights as jest.Mock).mockResolvedValue(mockHighlights);
+    render(<HighlightsCard {...baseProps} />);
+    await waitFor(() => {
+      expect(screen.getByText(/2 highlights · Home page/)).toBeTruthy();
+    });
+  });
+
+  it("opens new highlight form when Add is pressed", async () => {
+    render(<HighlightsCard {...baseProps} />);
+    await waitFor(() => expect(screen.getByText("Add")).toBeTruthy());
+    fireEvent.press(screen.getByText("Add"));
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText("e.g. Fast Wi-Fi")).toBeTruthy();
+    });
+  });
+
+  it("cancels new form when Cancel is pressed", async () => {
+    render(<HighlightsCard {...baseProps} />);
+    await waitFor(() => expect(screen.getByText("Add")).toBeTruthy());
+    fireEvent.press(screen.getByText("Add"));
+    await waitFor(() => expect(screen.getByText("Cancel")).toBeTruthy());
+    fireEvent.press(screen.getByText("Cancel"));
+    await waitFor(() => {
+      expect(screen.queryByPlaceholderText("e.g. Fast Wi-Fi")).toBeNull();
+    });
+  });
+
+  it("calls adminCreateHighlight when Save is pressed with a title", async () => {
+    const created = { id: 3, title: "New", body: "", iconKey: "star-outline", sortOrder: 0 };
+    (adminApi.adminCreateHighlight as jest.Mock).mockResolvedValue({ ok: true, data: created });
+    render(<HighlightsCard {...baseProps} />);
+    await waitFor(() => expect(screen.getByText("Add")).toBeTruthy());
+    fireEvent.press(screen.getByText("Add"));
+    await waitFor(() => expect(screen.getByPlaceholderText("e.g. Fast Wi-Fi")).toBeTruthy());
+    fireEvent.changeText(screen.getByPlaceholderText("e.g. Fast Wi-Fi"), "New");
+    await act(async () => {
+      fireEvent.press(screen.getByLabelText("Add this highlight"));
+    });
+    expect(adminApi.adminCreateHighlight).toHaveBeenCalledWith(
+      expect.objectContaining({ title: "New" })
+    );
+  });
+
+  it("does not call adminCreateHighlight when title is empty", async () => {
+    render(<HighlightsCard {...baseProps} />);
+    await waitFor(() => expect(screen.getByText("Add")).toBeTruthy());
+    fireEvent.press(screen.getByText("Add"));
+    await waitFor(() => expect(screen.getByLabelText("Add this highlight")).toBeTruthy());
+    await act(async () => {
+      fireEvent.press(screen.getByLabelText("Add this highlight"));
+    });
+    expect(adminApi.adminCreateHighlight).not.toHaveBeenCalled();
+  });
+
+  it("calls adminDeleteHighlight when delete button is pressed", async () => {
+    (adminApi.adminGetHighlights as jest.Mock).mockResolvedValue(mockHighlights);
+    (adminApi.adminDeleteHighlight as jest.Mock).mockResolvedValue(true);
+    render(<HighlightsCard {...baseProps} />);
+    await waitFor(() => expect(screen.getByText("Great Rooms")).toBeTruthy());
+    await act(async () => {
+      fireEvent.press(screen.getByLabelText("Delete highlight Great Rooms"));
+    });
+    expect(adminApi.adminDeleteHighlight).toHaveBeenCalledWith(1);
+  });
+
+  it("does not remove highlight when adminDeleteHighlight returns false", async () => {
+    (adminApi.adminGetHighlights as jest.Mock).mockResolvedValue([mockHighlights[0]]);
+    (adminApi.adminDeleteHighlight as jest.Mock).mockResolvedValue(false);
+    render(<HighlightsCard {...baseProps} />);
+    await waitFor(() => expect(screen.getByText("Great Rooms")).toBeTruthy());
+    await act(async () => {
+      fireEvent.press(screen.getByLabelText("Delete highlight Great Rooms"));
+    });
+    expect(screen.getByText("Great Rooms")).toBeTruthy();
+  });
+
+  it("opens edit form when pencil is pressed on existing highlight", async () => {
+    (adminApi.adminGetHighlights as jest.Mock).mockResolvedValue([mockHighlights[0]]);
+    render(<HighlightsCard {...baseProps} />);
+    await waitFor(() => expect(screen.getByText("Great Rooms")).toBeTruthy());
+    fireEvent.press(screen.getByLabelText("Edit highlight Great Rooms"));
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("Great Rooms")).toBeTruthy();
+    });
+  });
+
+  it("calls adminUpdateHighlight when saving an edited highlight", async () => {
+    const updated = { ...mockHighlights[0], title: "Amazing Rooms" };
+    (adminApi.adminGetHighlights as jest.Mock).mockResolvedValue([mockHighlights[0]]);
+    (adminApi.adminUpdateHighlight as jest.Mock).mockResolvedValue({ ok: true, data: updated });
+    render(<HighlightsCard {...baseProps} />);
+    await waitFor(() => expect(screen.getByText("Great Rooms")).toBeTruthy());
+    fireEvent.press(screen.getByLabelText("Edit highlight Great Rooms"));
+    await waitFor(() => expect(screen.getByDisplayValue("Great Rooms")).toBeTruthy());
+    fireEvent.changeText(screen.getByDisplayValue("Great Rooms"), "Amazing Rooms");
+    await act(async () => {
+      fireEvent.press(screen.getByLabelText("Save this highlight"));
+    });
+    expect(adminApi.adminUpdateHighlight).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ title: "Amazing Rooms" })
+    );
+  });
+
+  it("does not update list when adminUpdateHighlight returns null", async () => {
+    (adminApi.adminGetHighlights as jest.Mock).mockResolvedValue([mockHighlights[0]]);
+    (adminApi.adminUpdateHighlight as jest.Mock).mockResolvedValue(null);
+    render(<HighlightsCard {...baseProps} />);
+    await waitFor(() => expect(screen.getByText("Great Rooms")).toBeTruthy());
+    fireEvent.press(screen.getByLabelText("Edit highlight Great Rooms"));
+    await waitFor(() => expect(screen.getByDisplayValue("Great Rooms")).toBeTruthy());
+    fireEvent.changeText(screen.getByDisplayValue("Great Rooms"), "New Title");
+    await act(async () => {
+      fireEvent.press(screen.getByLabelText("Save this highlight"));
+    });
+    expect(adminApi.adminUpdateHighlight).toHaveBeenCalled();
+  });
+
+  it("does not add to list when adminCreateHighlight returns null", async () => {
+    (adminApi.adminCreateHighlight as jest.Mock).mockResolvedValue(null);
+    render(<HighlightsCard {...baseProps} />);
+    await waitFor(() => expect(screen.getByText("Add")).toBeTruthy());
+    fireEvent.press(screen.getByText("Add"));
+    await waitFor(() => expect(screen.getByPlaceholderText("e.g. Fast Wi-Fi")).toBeTruthy());
+    fireEvent.changeText(screen.getByPlaceholderText("e.g. Fast Wi-Fi"), "New");
+    await act(async () => {
+      fireEvent.press(screen.getByLabelText("Add this highlight"));
+    });
+    expect(adminApi.adminCreateHighlight).toHaveBeenCalled();
+    expect(screen.queryByText("New")).toBeNull();
+  });
+
+  it("changes icon when an icon option is pressed", async () => {
+    render(<HighlightsCard {...baseProps} />);
+    await waitFor(() => expect(screen.getByText("Add")).toBeTruthy());
+    fireEvent.press(screen.getByText("Add"));
+    await waitFor(() => expect(screen.getByPlaceholderText("e.g. Fast Wi-Fi")).toBeTruthy());
+    // Press the last accessible element — the icon pickers are the last rendered Pressables
+    const accessible = screen.UNSAFE_getAllByProps({ accessible: true });
+    fireEvent.press(accessible[accessible.length - 1]);
+    expect(screen.getByPlaceholderText("e.g. Fast Wi-Fi")).toBeTruthy();
+  });
+
+  // ── Link field ──────────────────────────────────────────────────────────
+
+  it("renders the Link input in the new highlight form", async () => {
+    render(<HighlightsCard {...baseProps} />);
+    await waitFor(() => expect(screen.getByText("Add")).toBeTruthy());
+    fireEvent.press(screen.getByText("Add"));
+    await waitFor(() =>
+      expect(screen.getByPlaceholderText("https://example.com/guide")).toBeTruthy()
+    );
+  });
+
+  it("passes link to adminCreateHighlight when set", async () => {
+    const created = {
+      id: 5,
+      title: "Guide",
+      body: "",
+      iconKey: "star-outline",
+      sortOrder: 0,
+      link: "https://example.com/guide",
+    };
+    (adminApi.adminCreateHighlight as jest.Mock).mockResolvedValue(created);
+    render(<HighlightsCard {...baseProps} />);
+    await waitFor(() => expect(screen.getByText("Add")).toBeTruthy());
+    fireEvent.press(screen.getByText("Add"));
+    await waitFor(() => expect(screen.getByPlaceholderText("e.g. Fast Wi-Fi")).toBeTruthy());
+    fireEvent.changeText(screen.getByPlaceholderText("e.g. Fast Wi-Fi"), "Guide");
+    fireEvent.changeText(
+      screen.getByPlaceholderText("https://example.com/guide"),
+      "https://example.com/guide"
+    );
+    await act(async () => {
+      fireEvent.press(screen.getByLabelText("Add this highlight"));
+    });
+    expect(adminApi.adminCreateHighlight).toHaveBeenCalledWith(
+      expect.objectContaining({ link: "https://example.com/guide" })
+    );
+  });
+
+  it("passes null link when the link field is left blank", async () => {
+    const created = {
+      id: 5,
+      title: "Plain",
+      body: "",
+      iconKey: "star-outline",
+      sortOrder: 0,
+      link: null,
+    };
+    (adminApi.adminCreateHighlight as jest.Mock).mockResolvedValue(created);
+    render(<HighlightsCard {...baseProps} />);
+    await waitFor(() => expect(screen.getByText("Add")).toBeTruthy());
+    fireEvent.press(screen.getByText("Add"));
+    await waitFor(() => expect(screen.getByPlaceholderText("e.g. Fast Wi-Fi")).toBeTruthy());
+    fireEvent.changeText(screen.getByPlaceholderText("e.g. Fast Wi-Fi"), "Plain");
+    await act(async () => {
+      fireEvent.press(screen.getByLabelText("Add this highlight"));
+    });
+    expect(adminApi.adminCreateHighlight).toHaveBeenCalledWith(
+      expect.objectContaining({ link: null })
+    );
+  });
+
+  it("pre-fills the link field when editing a highlight that has one", async () => {
+    (adminApi.adminGetHighlights as jest.Mock).mockResolvedValue([
+      { ...mockHighlights[0], link: "https://example.com/book" },
+    ]);
+    render(<HighlightsCard {...baseProps} />);
+    await waitFor(() => expect(screen.getByText("Great Rooms")).toBeTruthy());
+    fireEvent.press(screen.getByLabelText("Edit highlight Great Rooms"));
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("https://example.com/book")).toBeTruthy();
+    });
+  });
+
+  it("blocks save with an inline error when the link is an invalid URL (pre-flight)", async () => {
+    render(<HighlightsCard {...baseProps} />);
+    await waitFor(() => expect(screen.getByText("Add")).toBeTruthy());
+    fireEvent.press(screen.getByText("Add"));
+    await waitFor(() => expect(screen.getByPlaceholderText("e.g. Fast Wi-Fi")).toBeTruthy());
+    fireEvent.changeText(screen.getByPlaceholderText("e.g. Fast Wi-Fi"), "Award");
+    fireEvent.changeText(
+      screen.getByPlaceholderText("https://example.com/guide"),
+      "javascript:alert(1)"
+    );
+    await act(async () => {
+      fireEvent.press(screen.getByLabelText("Add this highlight"));
+    });
+    await waitFor(() => expect(screen.getByText(/valid link URL/)).toBeTruthy());
+    // Pre-flight means the API was never called.
+    expect(adminApi.adminCreateHighlight).not.toHaveBeenCalled();
+  });
+
+  it("shows an inline error and keeps the form open when create fails", async () => {
+    (adminApi.adminCreateHighlight as jest.Mock).mockResolvedValue({
+      ok: false,
+      message: "Highlight title cannot exceed 60 characters.",
+    });
+    render(<HighlightsCard {...baseProps} />);
+    await waitFor(() => expect(screen.getByText("Add")).toBeTruthy());
+    fireEvent.press(screen.getByText("Add"));
+    await waitFor(() => expect(screen.getByPlaceholderText("e.g. Fast Wi-Fi")).toBeTruthy());
+    fireEvent.changeText(screen.getByPlaceholderText("e.g. Fast Wi-Fi"), "Too long");
+    await act(async () => {
+      fireEvent.press(screen.getByLabelText("Add this highlight"));
+    });
+    await waitFor(() => expect(screen.getByText(/cannot exceed 60/)).toBeTruthy());
+    // Form stays open so the admin can fix the field.
+    expect(screen.getByDisplayValue("Too long")).toBeTruthy();
+  });
+
+  // ── Section copy (heading/subheading), moved here from the Brand Identity card ──────
+
+  it("renders the section heading and subheading fields", async () => {
+    render(<HighlightsCard {...baseProps} />);
+    await waitFor(() => expect(screen.getByText("Section Heading")).toBeTruthy());
+    expect(screen.getByText("Section Subheading")).toBeTruthy();
+  });
+
+  it("pre-fills the section copy from brand context", async () => {
+    mockBrandData = {
+      primaryColor: "#0a7ea4",
+      appName: "ResourceFlow",
+      highlightsHeading: "What we love",
+      highlightsSubheading: "Hand-picked",
+    };
+    render(<HighlightsCard {...baseProps} />);
+    await waitFor(() => expect(screen.getByDisplayValue("What we love")).toBeTruthy());
+    expect(screen.getByDisplayValue("Hand-picked")).toBeTruthy();
+  });
+
+  it("autosaves the section copy once editing stops", async () => {
+    (adminApi.saveBrandSettings as jest.Mock).mockResolvedValue({
+      ok: true,
+      data: { message: "Saved." },
+    });
+    render(<HighlightsCard {...baseProps} />);
+    await waitFor(() => expect(screen.getByText("Section Heading")).toBeTruthy());
+    fireEvent.changeText(screen.getByPlaceholderText("Spaces and facilities"), " Why visit us ");
+    fireEvent.changeText(screen.getByPlaceholderText("Curated by the owner"), "Our picks");
+    await waitFor(
+      () =>
+        expect(adminApi.saveBrandSettings).toHaveBeenCalledWith({
+          highlightsHeading: "Why visit us",
+          highlightsSubheading: "Our picks",
+        }),
+      { timeout: 2000 }
+    );
+    await waitFor(() => expect(screen.getByText("Saved")).toBeTruthy());
+  });
+
+  it("shows an error when saving the section copy fails", async () => {
+    (adminApi.saveBrandSettings as jest.Mock).mockResolvedValue(null);
+    render(<HighlightsCard {...baseProps} />);
+    await waitFor(() => expect(screen.getByText("Section Heading")).toBeTruthy());
+    fireEvent.changeText(screen.getByPlaceholderText("Spaces and facilities"), "Why visit us");
+    await waitFor(() => expect(screen.getByText("Couldn't reach the server.")).toBeTruthy(), {
+      timeout: 2000,
+    });
+  });
+
+  it("syncs the section copy when brand context updates", async () => {
+    const { rerender } = render(<HighlightsCard {...baseProps} />);
+    await waitFor(() => expect(screen.getByText("Section Heading")).toBeTruthy());
+    mockBrandData = {
+      primaryColor: "#0a7ea4",
+      appName: "ResourceFlow",
+      highlightsHeading: "Fresh copy",
+    };
+    await act(async () => {
+      rerender(<HighlightsCard {...baseProps} />);
+    });
+    expect(screen.getByDisplayValue("Fresh copy")).toBeTruthy();
+  });
+});

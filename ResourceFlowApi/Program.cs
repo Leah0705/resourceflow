@@ -1,0 +1,84 @@
+using ResourceFlowApi.Extensions;
+using ResourceFlowApi.Infrastructure.Auditing;
+using ResourceFlowApi.Infrastructure.Exceptions;
+using ResourceFlowApi.Infrastructure.NativeClients;
+
+WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
+
+if (!builder.Environment.IsEnvironment("Testing"))
+    builder.Configuration.AddJsonFile("appsettings.Local.json", optional: true, reloadOnChange: false);
+
+// Ensure the app listens on the PORT environment variable for Railway, defaulting to 8080
+builder.WebHost.UseUrls($"http://0.0.0.0:{Environment.GetEnvironmentVariable("PORT") ?? "8080"}");
+
+builder.WebHost.ConfigureKestrel(options =>
+{
+    options.AddServerHeader = false;
+});
+
+// ProblemDetails backs UseStatusCodePages (bare 404/405 etc.) and [ApiController]
+// model-state validation. The typed GlobalExceptionHandler runs first for *thrown*
+// exceptions (AddExceptionHandler registers it ahead of the default ProblemDetails
+// handler) and owns the {message: "..."} body shape for ResourceFlowException types.
+builder.Services.AddProblemDetails();
+builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
+builder.Services.AddProjectDependencies();
+builder.Services.AddCustomCors(builder.Configuration);
+builder.Services.AddCustomRateLimiting(builder.Environment);
+builder.Services.AddCustomAuthentication(builder.Configuration);
+
+string connectionString = builder.Configuration.GetAppConnectionString(builder.Environment);
+builder.Services.AddDatabaseSetup(connectionString, builder.Environment);
+
+WebApplication app = builder.Build();
+
+// Outermost on purpose: the audit entry is written after everything else has finished with the
+// request, so the status code it records is the one the caller actually received — including the
+// 400 that UseExceptionHandler (below) mapped a domain exception to — and the IP is the client's
+// as rewritten by UseForwardedHeaders rather than the proxy's.
+app.UseAdminAuditLog();
+
+// Convert unhandled exceptions and bare status-code responses (404/405/etc.)
+// into JSON. Must be one of the first middlewares so it can wrap the rest of the
+// pipeline. Thrown ResourceFlowException types are mapped to {message:"..."} by the
+// registered GlobalExceptionHandler (above); bare status codes fall back to
+// ProblemDetails via UseStatusCodePages below.
+app.UseExceptionHandler();
+app.UseStatusCodePages();
+
+app.UseForwardedHeaders();
+
+if (app.Environment.IsDevelopment() || app.Environment.IsEnvironment("Testing"))
+{
+    app.MapOpenApi();
+}
+
+app.UseCors("AllowFrontend");
+
+app.UseRateLimiter();
+
+// After the limiter: a request the limiter refused is not a native build in use, and counting it
+// would let one client mint counter rows as fast as it can send headers.
+app.UseNativeClientTelemetry();
+
+app.UseAuthentication();
+app.UseAuthorization();
+
+app.MapControllers();
+
+// Anything under /api/* that isn't matched by a controller route returns a
+// JSON ProblemDetails 404 — never the SPA's HTML index or an empty body.
+app.MapFallback("/api/{**catchAll}", (HttpContext ctx) =>
+    Results.Problem(
+        statusCode: StatusCodes.Status404NotFound,
+        title: "Not Found",
+        detail: $"The requested API endpoint '{ctx.Request.Path}' does not exist."));
+
+app.InitializeDatabase(connectionString, builder.Configuration);
+
+// Health endpoint: JSON body (consistent with the rest of the API), and opted
+// out of rate limiting so liveness probes / scanners never get throttled.
+app.MapGet("/api/health", () => Results.Ok(new { status = "ok" }))
+    .DisableRateLimiting();
+
+app.Run();

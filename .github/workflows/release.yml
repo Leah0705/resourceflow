@@ -1,0 +1,251 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  verify-version:
+    name: Verify version fields match the tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check package versions and CHANGELOG against the tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: ./scripts/check-release-version.sh "$RELEASE_TAG"
+
+  build-backend:
+    name: Build backend (multi-arch)
+    runs-on: ubuntu-latest
+    needs: [verify-version]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/resourceflow-backend
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./ResourceFlowApi/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+  build-frontend:
+    name: Build frontend (multi-arch)
+    runs-on: ubuntu-latest
+    needs: [verify-version]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/resourceflow-frontend
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: ./resourceflow-frontend
+          file: ./resourceflow-frontend/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: EXPO_PUBLIC_API_URL=/api
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+
+  build-nginx:
+    name: Build nginx (multi-arch)
+    runs-on: ubuntu-latest
+    needs: [verify-version]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/resourceflow-nginx
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: ./nginx
+          file: ./nginx/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=nginx
+          cache-to: type=gha,mode=max,scope=nginx
+
+  build-cli:
+    name: Build CLI (multi-arch)
+    runs-on: ubuntu-latest
+    needs: [verify-version]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/resourceflow-cli
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: ./resourceflow-cli
+          file: ./resourceflow-cli/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=cli
+          cache-to: type=gha,mode=max,scope=cli
+
+  publish-npm:
+    if: ${{ vars.RESOURCEFLOW_PUBLISH_NPM == 'true' }}
+    name: Publish CLI to npm
+    runs-on: ubuntu-latest
+    needs: [verify-version]
+    # Authentication is npm trusted publishing, so the id-token grant below IS the
+    # credential and there is no NPM_TOKEN to leak or rotate. npmjs.com pins the trusted
+    # publisher to this workflow's *filename*, so renaming release.yml stops publishing
+    # until the package's trusted-publisher settings are changed to match. This block also
+    # overrides the workflow-level grant: publishing needs no write on contents or packages.
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: resourceflow-cli/package-lock.json
+          registry-url: https://registry.npmjs.org
+
+      # Node has bundled a new enough npm since 24.5.0, so this should never fire. Without
+      # it, an older runner fails at the last step with a bare "need auth token", which
+      # reads as a broken trusted-publisher config rather than an out-of-date toolchain.
+      - name: Require an npm that can publish over OIDC
+        run: |
+          installed="$(npm -v)"
+          if [ "$(printf '%s\n11.5.1\n' "$installed" | sort -V | head -1)" != "11.5.1" ]; then
+            echo "npm $installed cannot use trusted publishing (needs >= 11.5.1)" >&2
+            exit 1
+          fi
+
+      - name: Install and test
+        working-directory: ./resourceflow-cli
+        run: |
+          npm ci
+          npm test
+
+      # No --provenance flag: publishing over OIDC attaches the attestation on its own.
+      - name: Publish
+        working-directory: ./resourceflow-cli
+        run: npm publish
+
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build-backend, build-frontend, build-nginx, build-cli]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Extract release notes for this version
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION_NUM="${VERSION#v}"
+          awk "/^## \[$VERSION_NUM\]/{flag=1; next} /^## \[/{flag=0} flag" CHANGELOG.md \
+            > /tmp/release-notes.md
+          if [ ! -s /tmp/release-notes.md ]; then
+            echo "No CHANGELOG entry found for $VERSION_NUM — using full CHANGELOG." >&2
+            cp CHANGELOG.md /tmp/release-notes.md
+          fi
+
+      - name: Generate pinned docker-compose.yml for this release
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION_NUM="${VERSION#v}"
+          sed "s|\${RESOURCEFLOW_VERSION:-latest}|${VERSION_NUM}|g" docker-compose.release.yml \
+            > /tmp/docker-compose.yml
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ github.ref_name }}"
+          gh release create "$VERSION" \
+            --title "ResourceFlow $VERSION" \
+            --notes-file /tmp/release-notes.md \
+            "/tmp/docker-compose.yml#docker-compose.yml"

@@ -1,0 +1,141 @@
+import { Pressable, View } from "react-native";
+import { useTranslation } from "react-i18next";
+import { ThemedText } from "@/components/themed-text";
+import { BookingDetailDto } from "@/api/admin";
+import { theme } from "@/theme/theme";
+import { StatusBadge } from "@/components/admin/bookings/StatusBadge";
+import { styles } from "@/components/admin/bookings/bookings.styles";
+import {
+  describeBookingRow,
+  focusedRowHighlight,
+  rowA11yProps,
+} from "@/components/admin/bookings/bookingRowProps";
+import { fmtDateTime, initials } from "@/utils/formatters";
+import { BookingsSortControl } from "@/components/admin/bookings/BookingsSortControl";
+import type { SortKey, SortState } from "@/components/admin/bookings/sorting";
+import { Icon } from "@/components/common/Icon";
+
+export interface BookingsCardListProps {
+  bookings: BookingDetailDto[];
+  focusedRowId: number | null;
+  onOpenBooking: (id: number) => void;
+  /** Active sort (drives the control indicator). */
+  sort: SortState;
+  onSortChange: (key: SortKey) => void;
+  borderColor: string;
+  cardBg: string;
+  mutedColor: string;
+  isDark: boolean;
+  primaryColor: string;
+}
+
+/**
+ * Narrow (mobile) bookings list — one card per booking. A
+ * `BookingsSortControl` row above the cards provides the sort affordance that
+ * the wide resource gets via clickable column headers.
+ */
+export function BookingsCardList({
+  bookings,
+  focusedRowId,
+  onOpenBooking,
+  sort,
+  onSortChange,
+  borderColor,
+  cardBg,
+  mutedColor,
+  isDark,
+  primaryColor,
+}: BookingsCardListProps) {
+  const { t } = useTranslation();
+  return (
+    <View style={styles.cardListWrap}>
+      <BookingsSortControl
+        sort={sort}
+        onSortChange={onSortChange}
+        borderColor={borderColor}
+        cardBg={cardBg}
+        mutedColor={mutedColor}
+        primaryColor={primaryColor}
+      />
+      <View style={styles.cardList}>
+        {bookings.map((b) => (
+          <Pressable
+            key={b.id}
+            {...rowA11yProps(b.id, focusedRowId, describeBookingRow(b, t))}
+            style={[
+              styles.listCard,
+              { backgroundColor: cardBg, borderColor },
+              focusedRowHighlight(b.id, focusedRowId, primaryColor),
+            ]}
+            onPress={() => onOpenBooking(b.id)}
+          >
+            <View style={styles.listCardRow}>
+              <View
+                style={{
+                  width: 40,
+                  height: 40,
+                  borderRadius: 20,
+                  backgroundColor: `${primaryColor}18`,
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+              >
+                <ThemedText style={{ fontSize: 13, fontWeight: "700", color: primaryColor }}>
+                  {initials(b.customerName ?? b.customerEmail)}
+                </ThemedText>
+              </View>
+              <View style={styles.listCardInfo}>
+                <ThemedText style={styles.tdGuest} numberOfLines={1}>
+                  {b.customerName ?? b.customerEmail}
+                </ThemedText>
+                {b.customerName ? (
+                  <ThemedText style={[styles.tdNotes, { color: mutedColor }]} numberOfLines={1}>
+                    {b.customerEmail}
+                  </ThemedText>
+                ) : null}
+                {!!b.previousNoShows && (
+                  <ThemedText
+                    style={[
+                      styles.tdNotes,
+                      { color: theme.status.noShow.text[isDark ? "dark" : "light"] },
+                    ]}
+                    numberOfLines={1}
+                  >
+                    {t("admin.bookings.previousNoShows", { count: b.previousNoShows })}
+                  </ThemedText>
+                )}
+                <ThemedText style={[styles.tdTime, { fontSize: 13 }]}>
+                  {fmtDateTime(new Date(b.date))}
+                </ThemedText>
+                <View style={styles.partyPill}>
+                  <Icon name="people-outline" size="xs" color={mutedColor} />
+                  <ThemedText style={[styles.tdDate, { color: mutedColor }]}>
+                    {t("booking.form.partySize", { count: b.partySize })} · {b.resourceName}
+                  </ThemedText>
+                </View>
+              </View>
+              <View style={styles.listCardRight}>
+                {b.isCancelled ? (
+                  <View
+                    style={[
+                      styles.badge,
+                      {
+                        backgroundColor: theme.status.cancelled.bg[isDark ? "dark" : "light"],
+                      },
+                    ]}
+                  >
+                    <ThemedText style={[styles.badgeText, { color: theme.status.cancelled.text }]}>
+                      {t("admin.bookings.status.cancelled")}
+                    </ThemedText>
+                  </View>
+                ) : (
+                  <StatusBadge booking={b} isDark={isDark} />
+                )}
+              </View>
+            </View>
+          </Pressable>
+        ))}
+      </View>
+    </View>
+  );
+}

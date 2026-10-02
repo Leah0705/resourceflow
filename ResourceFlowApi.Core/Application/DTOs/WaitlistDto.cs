@@ -1,0 +1,125 @@
+using System.ComponentModel.DataAnnotations;
+using ResourceFlowApi.Core.Application.Utilities;
+using ResourceFlowApi.Core.Domain;
+
+namespace ResourceFlowApi.Core.Application.DTOs;
+
+public class JoinWaitlistRequest
+{
+    [Required, StringLength(WaitlistFields.MaxNameLength)]
+    public string Name { get; set; } = string.Empty;
+
+    [Range(BookingLimits.MinPartySize, BookingLimits.MaxPartySize)]
+    public int PartySize { get; set; }
+
+    /// <summary>Optional. Where the "resource ready" email goes.</summary>
+    [StringLength(ContactLimits.MaxEmailLength)]
+    public string? Email { get; set; }
+
+    [StringLength(GuestPushFields.MaxLocaleLength)]
+    public string? Locale { get; set; }
+}
+
+/// <summary>The device a guest wants pushed when their resource is ready.</summary>
+public class WaitlistPushRequest
+{
+    /// <summary>"expo" from the native app, "webpush" from a browser.</summary>
+    [Required, StringLength(GuestPushFields.MaxChannelLength)]
+    public string Channel { get; set; } = string.Empty;
+
+    /// <summary>The Expo push token, or the Web Push subscription endpoint.</summary>
+    [Required, StringLength(GuestPushFields.MaxEndpointLength)]
+    public string Endpoint { get; set; } = string.Empty;
+
+    [StringLength(GuestPushFields.MaxKeyLength)]
+    public string? P256dh { get; set; }
+
+    [StringLength(GuestPushFields.MaxKeyLength)]
+    public string? Auth { get; set; }
+}
+
+/// <summary>What a guest sees about their own place in the queue. Never carries the email.</summary>
+public class WaitlistStatusDto
+{
+    public string Ref { get; set; } = string.Empty;
+    public int Number { get; set; }
+    public int VenueId { get; set; }
+    public string VenueName { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+    public int PartySize { get; set; }
+
+    /// <summary>"waiting" | "notified" | "inuse" | "left" | "expired".</summary>
+    public string Status { get; set; } = string.Empty;
+
+    /// <summary>Active parties ahead of this one; null once the entry has left the queue.</summary>
+    public int? PartiesAhead { get; set; }
+
+    /// <summary>Minutes until a resource is expected; 0 when one is free now, null when it can't be estimated.</summary>
+    public int? EstimatedWaitMinutes { get; set; }
+
+    public DateTime JoinedAt { get; set; }
+    public DateTime? NotifiedAt { get; set; }
+
+    /// <summary>Whether a device will be pushed when the resource is ready.</summary>
+    public bool PushEnabled { get; set; }
+}
+
+/// <summary>What a guest sees before joining: whether the queue is open and the wait a new party would face.</summary>
+public class WaitlistQuoteDto
+{
+    public int VenueId { get; set; }
+    public bool AcceptingGuests { get; set; }
+    public int PartiesWaiting { get; set; }
+
+    /// <summary>Minutes a party of the requested size would wait if it joined now; null when no resource can fit it.</summary>
+    public int? EstimatedWaitMinutes { get; set; }
+}
+
+public class WaitlistEntryDto
+{
+    public int Id { get; set; }
+    public int Number { get; set; }
+    public string? Name { get; set; }
+    public string? Email { get; set; }
+    public int PartySize { get; set; }
+    public string Status { get; set; } = string.Empty;
+    public DateTime JoinedAt { get; set; }
+    public DateTime? NotifiedAt { get; set; }
+    public int PartiesAhead { get; set; }
+    public int? EstimatedWaitMinutes { get; set; }
+
+    /// <summary>True when a resource or group can take the party this minute.</summary>
+    public bool CanAssignNow { get; set; }
+
+    /// <summary>
+    /// When the party can be assigned now but is quoted a wait, the ticket number of the first party
+    /// ahead it would overtake.
+    /// </summary>
+    /// <seealso>WaitlistServiceTests.GetBoardAsync_NamesThePartyAnAssignableRowSkips</seealso>
+    /// <seealso>WaitlistServiceTests.GetBoardAsync_NamesNoOneSkipped_WhenTheRowCannotBeAssignedNow</seealso>
+    public int? SkipsNumber { get; set; }
+}
+
+public class WaitlistBoardDto
+{
+    public int VenueId { get; set; }
+
+    /// <summary>Whether guests can join from the public site right now (a walk-in-only, open slot).</summary>
+    public bool AcceptingGuests { get; set; }
+
+    public List<WaitlistEntryDto> Entries { get; set; } = new();
+}
+
+/// <summary>Assigns a party to a resource. With neither id set the smallest free unit that fits is chosen.</summary>
+public class AssignWaitlistEntryRequest
+{
+    public int? ResourceId { get; set; }
+    public int? ResourceGroupId { get; set; }
+}
+
+public class AssignWaitlistEntryResponse
+{
+    public WaitlistEntryDto Entry { get; set; } = null!;
+    public int BookingId { get; set; }
+    public string BookingRef { get; set; } = string.Empty;
+}

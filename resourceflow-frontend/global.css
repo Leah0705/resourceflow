@@ -1,0 +1,235 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root,
+#__next,
+[data-expo-root] {
+  margin: 0;
+  padding: 0;
+  background-color: #f2f3f5;
+  color: #000000;
+  overflow-x: hidden;
+}
+
+/* No pull-to-refresh. The booking sheet is dismissed by dragging it downwards, which is
+   the same gesture a mobile browser reloads the page on, and the browser wins: the guest
+   loses the sheet, the held resource and anything typed into the form. `contain` keeps
+   ordinary scrolling intact and only drops the overscroll effect at the ends. */
+html,
+body {
+  overscroll-behavior-y: contain;
+}
+
+html,
+body {
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Oxygen", "Ubuntu", "Cantarell",
+    "Fira Sans", "Droid Sans", "Helvetica Neue", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+html.light,
+html.light body,
+body.light,
+body.light #root,
+body.light #__next {
+  background-color: #f2f3f5;
+  color: #000000;
+}
+
+html.dark,
+html.dark body,
+body.dark,
+body.dark #root {
+  background-color: #111214;
+  color: #ffffff;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.light ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.light ::-webkit-scrollbar-thumb {
+  background: #9ca3af;
+  border-radius: 5px;
+  border: 2px solid #f2f3f5;
+}
+
+.light ::-webkit-scrollbar-thumb:hover {
+  background: #6b7280;
+}
+
+.dark ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: #4b5563;
+  border-radius: 5px;
+  border: 2px solid #111214;
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: #6b7280;
+}
+
+:focus-visible {
+  outline: 2px solid #0a7ea4;
+  outline-offset: 2px;
+}
+
+input:focus-visible,
+textarea:focus-visible {
+  outline: none;
+}
+
+* {
+  transition: none !important;
+}
+
+body.theme-ready * {
+  transition:
+    background-color 0.2s ease,
+    color 0.2s ease,
+    border-color 0.2s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body.theme-ready * {
+    transition: none !important;
+  }
+}
+
+/* The home page's large title collapses into the navbar as you scroll, the way a native
+   large-title header does. It is the same string as the navbar's own brand text, so it can
+   simply shrink toward its top-left corner and fade — the navbar's copy is already slot
+   where it lands, and the handover reads as one title moving rather than two existing.
+
+   Driven by a scroll timeline, not by JS: a scroll-linked animation stepped from a scroll
+   handler ticks on the same main thread the list is already busy on (see
+   utils/webAnimation.ts for the measurement that pushed route transitions off it), and it
+   would have to re-render the page on every frame to do it. `scroll()` hands the whole
+   thing to the compositor. Where it isn't supported the hero simply scrolls away, which is
+   what it did before. */
+/* The fade lives on the pill, not on the title: with a hero image the title sits in a
+   card with its own background and border, and fading only the text left an empty box
+   slot over the image for the length of the range. */
+@keyframes home-hero-box-collapse {
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes home-hero-title-collapse {
+  to {
+    transform: scale(0.34) translateY(-10px);
+  }
+}
+
+@keyframes home-hero-sub-collapse {
+  to {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+}
+
+/* Named rather than `scroll(nearest)`: an `overflow: hidden` element is a scroll container
+   too, so `nearest` bound the animation to the hero itself — which never scrolls, leaving
+   the title frozen at progress 0. The name is declared on the one element that does scroll
+   and resolved from its descendants.
+
+   The ranges are short on purpose: the title only has ~56px of scroll before it reaches the
+   navbar's underside, so a longer range would leave it scrolling past at full size and the
+   handover would read as the title leaving rather than landing. */
+[data-scroll-timeline="home"] {
+  scroll-timeline-name: --home-scroll;
+  scroll-timeline-axis: block;
+}
+
+/* Phone widths only: the collapse borrows a native large-title header, an idiom a phone
+   browser has and a desktop one does not — on a wide window the hero is simply a hero and
+   shrinking it hands the title to a navbar the eye was not following. `767.98px` is
+   BREAKPOINTS.mobile (768) as a max-width; CSS cannot import the constant, so moving one
+   means moving both. */
+@media (max-width: 767.98px) {
+  @supports (animation-timeline: scroll()) {
+    [data-hero-collapse="box"] {
+      animation: home-hero-box-collapse linear both;
+      animation-timeline: --home-scroll;
+      animation-range: 0px 130px;
+    }
+
+    [data-hero-collapse="title"] {
+      transform-origin: left top;
+      animation: home-hero-title-collapse linear both;
+      animation-timeline: --home-scroll;
+      animation-range: 0px 130px;
+    }
+
+    [data-hero-collapse="sub"] {
+      animation: home-hero-sub-collapse linear both;
+      animation-timeline: --home-scroll;
+      animation-range: 0px 90px;
+    }
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-hero-collapse] {
+    animation: none;
+  }
+}
+
+/* The location cards arrive and leave the way the hero title does: a fade driven by the
+   page's own scroll rather than by a handler, so nothing re-renders per frame. `view()`
+   runs each card against its own passage through the scrollport, which is why one keyframe
+   set covers both ends — the plateau in the middle is the card slot in view, and the
+   two edges are it entering and leaving. Unlike the hero collapse this is not phone-only:
+   it is the cards responding to the scroll, not a native large-title idiom.
+
+   Not guarded by a width query, but it is guarded by @supports: where `view()` is missing
+   the cards are simply opaque, which is what they were before. */
+@keyframes home-card-reveal {
+  0% {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  18%,
+  82% {
+    opacity: 1;
+    transform: none;
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-14px);
+  }
+}
+
+@supports (animation-timeline: view()) {
+  [data-card-reveal] {
+    animation: home-card-reveal linear both;
+    animation-timeline: view();
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-card-reveal] {
+    animation: none;
+  }
+}
+
+.grab-scroll {
+  cursor: grab !important;
+}
+.grabbing {
+  cursor: grabbing !important;
+}

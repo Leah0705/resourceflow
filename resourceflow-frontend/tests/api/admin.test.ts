@@ -1,0 +1,1369 @@
+import {
+  getAdminOverview,
+  getAdminDashboardStats,
+  getAdminBookings,
+  getAdminBooking,
+  adminCreateBooking,
+  adminExtendBooking,
+  adminSetBookingStatus,
+  adminDeleteBooking,
+  adminPurgeBooking,
+  adminCreateVenue,
+  adminDeleteVenue,
+  adminGetVenueDeletePreview,
+  adminSetVenueArchived,
+  adminGetResources,
+  adminGetVenues,
+  adminGetSections,
+  reorderSections,
+  adminRestoreBooking,
+  adminUpdateBookingFull,
+  getEmailSettings,
+  saveEmailSettings,
+  testEmailConnection,
+  saveBrandSettings,
+  adminGetHighlights,
+  adminCreateHighlight,
+  adminUpdateHighlight,
+  adminDeleteHighlight,
+  adminLookupBookings,
+  sendBookingEmail,
+  pauseVenueBookings,
+  unpauseVenueBookings,
+  extendVenueBookings,
+  getEmailFailures,
+  uploadHeroImage,
+  deleteHeroImage,
+  adminGetSocialLinks,
+  adminCreateSocialLink,
+  adminUpdateSocialLink,
+  adminDeleteSocialLink,
+} from "@/api/admin";
+
+// Admin API now uses credentials: "include" for cookie-based auth — no mock needed
+
+const mockFetch = jest.fn();
+global.fetch = mockFetch;
+
+beforeEach(() => {
+  mockFetch.mockReset();
+  jest.spyOn(console, "error").mockImplementation();
+});
+
+// ---------- Overview ----------
+
+describe("getAdminOverview", () => {
+  it("fetches GET /api/admin/overview and returns data", async () => {
+    const overview = { totalVenues: 2, totalBookings: 10, todayBookings: 3, totalCapacity: 40 };
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => overview });
+
+    const result = await getAdminOverview();
+
+    expect(result).toEqual(overview);
+    expect(mockFetch.mock.calls[0][0]).toContain("/api/admin/overview");
+    expect(mockFetch.mock.calls[0][1].credentials).toBe("include");
+  });
+
+  it("returns null on failure", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false });
+    expect(await getAdminOverview()).toBeNull();
+  });
+
+  it("returns null on network error", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("offline"));
+    expect(await getAdminOverview()).toBeNull();
+  });
+});
+
+describe("getAdminDashboardStats", () => {
+  it("combines overview and todayBookingsList into stats", async () => {
+    const futureDate = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
+    const overview = {
+      todayBookings: 5,
+      totalCapacity: 100,
+      todayBookingsList: [
+        {
+          id: 1,
+          date: futureDate,
+          customerEmail: "a@b.com",
+          partySize: 2,
+          venueName: "R1",
+        },
+      ],
+    };
+
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => overview });
+
+    const result = await getAdminDashboardStats();
+
+    expect(result).toEqual({
+      todayCount: 5,
+      activeHoldsCount: 0,
+      pausedCount: 0,
+      noShowCount: 0,
+      scheduleConflictsCount: 0,
+      scheduleConflictLocationIds: [],
+      totalGuests: 100,
+      occupancyData: [],
+      occupancyDates: [],
+      occupancyCounts: [],
+      pacing: [],
+      recentBookings: [
+        {
+          id: 1,
+          date: futureDate,
+          endTime: undefined,
+          customerEmail: "a@b.com",
+          partySize: 2,
+          venueName: "R1",
+          bookingRef: "",
+          isCancelled: undefined,
+          status: undefined,
+        },
+      ],
+    });
+  });
+
+  it("passes today's no-show count through", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ todayBookings: 3, totalCapacity: 8, todayNoShowsCount: 2 }),
+    });
+
+    expect((await getAdminDashboardStats())?.noShowCount).toBe(2);
+  });
+
+  it("passes today's pacing through", async () => {
+    const todayPacing = [
+      {
+        venueId: 1,
+        venueName: "R1",
+        maxGuestsPerSlot: 8,
+        slots: [{ time: "19:00", guests: 6 }],
+      },
+    ];
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ todayBookings: 1, totalCapacity: 6, todayPacing }),
+    });
+
+    expect((await getAdminDashboardStats())?.pacing).toEqual(todayPacing);
+  });
+
+  it("passes occupancyDates through when present in overview", async () => {
+    const overview = {
+      todayBookings: 1,
+      totalCapacity: 10,
+      occupancyDates: [
+        "2026-07-07",
+        "2026-07-08",
+        "2026-07-09",
+        "2026-07-10",
+        "2026-07-11",
+        "2026-07-12",
+        "2026-07-13",
+      ],
+      todayBookingsList: [],
+    };
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => overview });
+
+    const result = await getAdminDashboardStats();
+
+    expect(result?.occupancyDates).toEqual(overview.occupancyDates);
+  });
+
+  it("passes occupancyCounts through when present in overview", async () => {
+    const overview = {
+      todayBookings: 1,
+      totalCapacity: 10,
+      occupancyCounts: [0, 1, 2, 3, 4, 5, 6],
+      todayBookingsList: [],
+    };
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => overview });
+
+    const result = await getAdminDashboardStats();
+
+    expect(result?.occupancyCounts).toEqual([0, 1, 2, 3, 4, 5, 6]);
+  });
+
+  it("returns null if overview fails", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false });
+    const result = await getAdminDashboardStats();
+    expect(result).toBeNull();
+  });
+
+  it("makes only one fetch call (no separate bookings request)", async () => {
+    const overview = { todayBookings: 1, totalCapacity: 10, todayBookingsList: [] };
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => overview });
+
+    await getAdminDashboardStats();
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("includes cancelled bookings from todayBookingsList with isCancelled flag", async () => {
+    const future1 = new Date(Date.now() + 1 * 60 * 60 * 1000).toISOString();
+    const future2 = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
+    const overview = {
+      todayBookings: 2,
+      totalCapacity: 10,
+      todayBookingsList: [
+        {
+          id: 1,
+          date: future1,
+          customerEmail: "active@test.com",
+          partySize: 2,
+          venueName: "R1",
+          isCancelled: false,
+        },
+        {
+          id: 2,
+          date: future2,
+          customerEmail: "cancelled@test.com",
+          partySize: 3,
+          venueName: "R1",
+          isCancelled: true,
+        },
+      ],
+    };
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => overview });
+
+    const result = await getAdminDashboardStats();
+
+    expect(result?.recentBookings).toHaveLength(2);
+    expect(result?.recentBookings[0].isCancelled).toBe(false);
+    expect(result?.recentBookings[1].isCancelled).toBe(true);
+  });
+
+  it("filters out past bookings and caps at 5", async () => {
+    const now = Date.now();
+    const pastDate = new Date(now - 3 * 60 * 60 * 1000).toISOString();
+    const futureBookings = Array.from({ length: 6 }, (_, i) => ({
+      id: i + 1,
+      date: new Date(now + (i + 1) * 60 * 60 * 1000).toISOString(),
+      customerEmail: `guest${i + 1}@test.com`,
+      partySize: 2,
+      venueName: "R1",
+    }));
+    const overview = {
+      todayBookings: 7,
+      totalCapacity: 20,
+      todayBookingsList: [
+        { id: 0, date: pastDate, customerEmail: "past@test.com", partySize: 2, venueName: "R1" },
+        ...futureBookings,
+      ],
+    };
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => overview });
+
+    const result = await getAdminDashboardStats();
+
+    expect(result?.recentBookings).toHaveLength(5);
+    expect(result?.recentBookings.every((b) => new Date(b.date) > new Date(pastDate))).toBe(true);
+  });
+
+  it("returns null when fetch throws", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("network error"));
+    const result = await getAdminDashboardStats();
+    expect(result).toBeNull();
+  });
+
+  it("uses empty array when todayBookingsList is absent from overview", async () => {
+    const overview = { todayBookings: 0, totalCapacity: 0 };
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => overview });
+    const result = await getAdminDashboardStats();
+    expect(result?.recentBookings).toEqual([]);
+  });
+
+  it("uses endTime for filtering when booking has endTime set", async () => {
+    const pastDate = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    const futureEndTime = new Date(Date.now() + 1 * 60 * 60 * 1000).toISOString();
+    const overview = {
+      todayBookings: 1,
+      totalCapacity: 10,
+      todayBookingsList: [
+        {
+          id: 1,
+          date: pastDate,
+          endTime: futureEndTime,
+          customerEmail: "a@b.com",
+          partySize: 2,
+          venueName: "R1",
+        },
+      ],
+    };
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => overview });
+    const result = await getAdminDashboardStats();
+    expect(result?.recentBookings).toHaveLength(1);
+    expect(result?.recentBookings[0].endTime).toBe(futureEndTime);
+  });
+
+  it("returns null when todayBookingsList is malformed and throws", async () => {
+    const overview = {
+      todayBookings: 1,
+      totalCapacity: 10,
+      todayBookingsList: "not-an-array",
+    };
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => overview });
+    const result = await getAdminDashboardStats();
+    expect(result).toBeNull();
+  });
+});
+
+// ---------- Bookings ----------
+
+describe("getAdminBookings", () => {
+  it("fetches bookings with no optional params", async () => {
+    const bookings = [{ id: 1 }];
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => bookings });
+
+    const result = await getAdminBookings();
+
+    expect(result).toEqual(bookings);
+    const url = mockFetch.mock.calls[0][0] as string;
+    expect(url).toContain("/api/admin/bookings");
+    expect(url).not.toContain("?");
+  });
+
+  it("appends venueId and date query params", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => [] });
+
+    await getAdminBookings(5, "2026-03-23");
+
+    const url = mockFetch.mock.calls[0][0] as string;
+    expect(url).toContain("venueId=5");
+    expect(url).toContain("date=2026-03-23");
+  });
+
+  it("appends status param only when not active", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => [] });
+
+    await getAdminBookings(1, undefined, "cancelled");
+
+    const url = mockFetch.mock.calls[0][0] as string;
+    expect(url).toContain("status=cancelled");
+  });
+
+  it("returns empty array on failure", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false });
+    expect(await getAdminBookings()).toEqual([]);
+  });
+
+  it("returns empty array on network error", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("offline"));
+    expect(await getAdminBookings()).toEqual([]);
+  });
+});
+
+describe("getAdminBooking", () => {
+  it("fetches a single booking by id", async () => {
+    const booking = { id: 7, customerEmail: "a@b.com" };
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => booking });
+
+    const result = await getAdminBooking(7);
+
+    expect(result).toEqual(booking);
+    expect(mockFetch.mock.calls[0][0]).toContain("/api/admin/bookings/7");
+  });
+
+  it("returns null on non-ok response", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false });
+    expect(await getAdminBooking(999)).toBeNull();
+  });
+
+  it("returns null on network error", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("offline"));
+    expect(await getAdminBooking(1)).toBeNull();
+  });
+});
+
+describe("adminCreateBooking", () => {
+  const req = {
+    venueId: 1,
+    sectionId: 2,
+    resourceId: 3,
+    date: "2026-06-15T19:00:00Z",
+    customerEmail: "c@d.com",
+    partySize: 4,
+  };
+
+  it("posts to /api/admin/bookings and returns created booking", async () => {
+    const created = { ...req, id: 42 };
+    mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => created });
+
+    const result = await adminCreateBooking(req);
+
+    expect(result).toEqual(created);
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toContain("/api/admin/bookings");
+    expect(opts.method).toBe("POST");
+    expect(JSON.parse(opts.body)).toEqual(req);
+  });
+
+  it("throws with server message on 409 conflict", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 409,
+      json: async () => ({ message: "Already booked" }),
+    });
+
+    await expect(adminCreateBooking(req)).rejects.toThrow("Already booked");
+  });
+
+  it("throws generic message on 409 without json body", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 409,
+      json: async () => {
+        throw new Error("no json");
+      },
+    });
+
+    await expect(adminCreateBooking(req)).rejects.toThrow(
+      "This resource is already booked on that date."
+    );
+  });
+
+  it("throws on non-ok non-409 response", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
+
+    await expect(adminCreateBooking(req)).rejects.toThrow("Failed to create booking");
+  });
+});
+
+describe("adminExtendBooking", () => {
+  it("posts extend request and returns endTime", async () => {
+    const data = { endTime: "2026-06-15T21:00:00Z" };
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => data });
+
+    const result = await adminExtendBooking(5, 30);
+
+    expect(result).toEqual(data);
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toContain("/api/admin/bookings/5/extend");
+    expect(opts.method).toBe("POST");
+    expect(JSON.parse(opts.body)).toEqual({ minutes: 30 });
+  });
+
+  it("returns null on failure", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false });
+    expect(await adminExtendBooking(5, 30)).toBeNull();
+  });
+});
+
+describe("adminSetBookingStatus", () => {
+  it("posts the status and returns the updated booking", async () => {
+    const updated = { id: 5, status: "InUse" };
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => updated });
+
+    const result = await adminSetBookingStatus(5, "InUse");
+
+    expect(result).toEqual(updated);
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toContain("/api/admin/bookings/5/status");
+    expect(opts.method).toBe("POST");
+    expect(JSON.parse(opts.body)).toEqual({ status: "InUse" });
+  });
+
+  it("throws with the server's reason when the move is refused", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      json: async () => ({
+        message: "A booking can only be marked as a no-show once its slot has started.",
+      }),
+    });
+
+    await expect(adminSetBookingStatus(5, "NoShow")).rejects.toThrow(
+      "A booking can only be marked as a no-show once its slot has started."
+    );
+  });
+});
+
+describe("adminDeleteBooking", () => {
+  it("posts to cancel endpoint and returns true on success", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true });
+
+    const result = await adminDeleteBooking(10);
+
+    expect(result).toBe(true);
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toContain("/api/admin/bookings/10/cancel");
+    expect(opts.method).toBe("POST");
+  });
+
+  it("throws with server message on failure", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      json: async () => ({ message: "Cannot cancel a booking that has already passed." }),
+    });
+
+    await expect(adminDeleteBooking(10)).rejects.toThrow(
+      "Cannot cancel a booking that has already passed."
+    );
+  });
+
+  it("throws generic message on failure without body", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      json: async () => {
+        throw new Error("no json");
+      },
+    });
+
+    await expect(adminDeleteBooking(10)).rejects.toThrow("Failed to cancel the booking.");
+  });
+
+  it("throws on network error", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("offline"));
+    await expect(adminDeleteBooking(10)).rejects.toThrow("offline");
+  });
+});
+
+describe("adminPurgeBooking", () => {
+  it("sends DELETE to booking endpoint and returns true", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true });
+
+    const result = await adminPurgeBooking(10);
+
+    expect(result).toBe(true);
+    expect(mockFetch.mock.calls[0][0]).toContain("/api/admin/bookings/10");
+    expect(mockFetch.mock.calls[0][0]).not.toContain("/purge");
+    expect(mockFetch.mock.calls[0][1].method).toBe("DELETE");
+  });
+
+  it("returns false on failure", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false });
+    expect(await adminPurgeBooking(10)).toBe(false);
+  });
+
+  it("returns false on network error", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("offline"));
+    expect(await adminPurgeBooking(10)).toBe(false);
+  });
+});
+
+// ---------- Venues ----------
+
+describe("adminCreateVenue", () => {
+  it("posts to /api/admin/venues and returns data", async () => {
+    const created = { id: 1, name: "Test Venue" };
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => created });
+
+    const result = await adminCreateVenue({ name: "Test Venue" });
+
+    expect(result).toEqual(created);
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toContain("/api/admin/venues");
+    expect(opts.method).toBe("POST");
+  });
+
+  it("returns null on failure", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false });
+    expect(await adminCreateVenue({ name: "Fail" })).toBeNull();
+  });
+});
+
+describe("adminDeleteVenue", () => {
+  it("sends DELETE and returns true on success", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true });
+
+    expect(await adminDeleteVenue(3)).toBe(true);
+    expect(mockFetch.mock.calls[0][0]).toContain("/api/admin/venues/3");
+    expect(mockFetch.mock.calls[0][1].method).toBe("DELETE");
+  });
+
+  it("returns false on failure", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false });
+    expect(await adminDeleteVenue(3)).toBe(false);
+  });
+
+  it("returns false on network error", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("offline"));
+    expect(await adminDeleteVenue(3)).toBe(false);
+  });
+});
+
+describe("adminGetVenueDeletePreview", () => {
+  it("fetches the delete preview", async () => {
+    const preview = { id: 3, name: "R3", isArchived: true, sectionCount: 1 };
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => preview });
+
+    expect(await adminGetVenueDeletePreview(3)).toEqual(preview);
+    expect(mockFetch.mock.calls[0][0]).toContain("/api/admin/venues/3/delete-preview");
+  });
+
+  it("returns null on failure", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false });
+    expect(await adminGetVenueDeletePreview(3)).toBeNull();
+  });
+
+  it("returns null on network error", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("offline"));
+    expect(await adminGetVenueDeletePreview(3)).toBeNull();
+  });
+});
+
+describe("adminSetVenueArchived", () => {
+  it("sends PATCH with isArchived true and returns true on success", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true });
+    expect(await adminSetVenueArchived(1, true)).toBe(true);
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toContain("/api/admin/venues/1");
+    expect(opts.method).toBe("PATCH");
+    expect(JSON.parse(opts.body)).toEqual({ isArchived: true });
+  });
+
+  it("returns false on non-ok response", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false });
+    expect(await adminSetVenueArchived(1, false)).toBe(false);
+  });
+
+  it("returns false on network error", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("offline"));
+    expect(await adminSetVenueArchived(1, true)).toBe(false);
+  });
+});
+
+describe("reorderSections", () => {
+  it("sends PATCH with sectionIds and returns true on success", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true });
+    expect(await reorderSections(1, [3, 1, 2])).toBe(true);
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toContain("/api/admin/venues/1/sections/reorder");
+    expect(opts.method).toBe("PATCH");
+    expect(JSON.parse(opts.body)).toEqual({ sectionIds: [3, 1, 2] });
+  });
+
+  it("returns false on non-ok response", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false });
+    expect(await reorderSections(1, [1, 2])).toBe(false);
+  });
+
+  it("returns false on network error", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("offline"));
+    expect(await reorderSections(1, [1, 2])).toBe(false);
+  });
+});
+
+// ---------- Resources ----------
+
+describe("adminGetResources", () => {
+  it("fetches resources for a location", async () => {
+    const sections = [{ id: 1, name: "Main", resources: [{ id: 1, name: "T1", capacity: 4 }] }];
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => sections });
+
+    const result = await adminGetResources(2);
+
+    expect(result).toEqual(sections);
+    expect(mockFetch.mock.calls[0][0]).toContain("/api/admin/venues/2/resources");
+  });
+
+  it("returns empty array on non-ok response", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false });
+    expect(await adminGetResources(2)).toEqual([]);
+  });
+
+  it("returns empty array on network error", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("offline"));
+    expect(await adminGetResources(2)).toEqual([]);
+  });
+});
+
+// ---------- Email Settings ----------
+
+describe("getEmailSettings", () => {
+  it("fetches email settings", async () => {
+    const settings = {
+      host: "smtp.test.com",
+      port: 587,
+      username: "user",
+      password: "pass",
+      enableSsl: true,
+      isConfigured: true,
+    };
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => settings });
+
+    const result = await getEmailSettings();
+
+    expect(result).toEqual(settings);
+    expect(mockFetch.mock.calls[0][0]).toContain("/api/admin/email-settings");
+  });
+
+  it("returns defaults on failure", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false });
+
+    const result = await getEmailSettings();
+
+    expect(result).toEqual({
+      host: "",
+      port: 587,
+      username: "",
+      password: "",
+      enableSsl: true,
+      isConfigured: false,
+      sendBookingConfirmations: false,
+    });
+  });
+});
+
+describe("saveEmailSettings", () => {
+  const data = {
+    host: "smtp.test.com",
+    port: 587,
+    username: "user",
+    password: "pass",
+    enableSsl: true,
+    sendBookingConfirmations: false,
+  };
+
+  it("patches email settings and returns response", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ message: "Saved" }) });
+
+    const result = await saveEmailSettings(data);
+
+    expect(result).toEqual({ message: "Saved" });
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toContain("/api/admin/email-settings");
+    expect(opts.method).toBe("PATCH");
+  });
+
+  it("returns null on network error", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("offline"));
+    expect(await saveEmailSettings(data)).toBeNull();
+  });
+});
+
+describe("testEmailConnection", () => {
+  it("returns ok true with message on success", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ message: "Connection OK" }),
+    });
+
+    const result = await testEmailConnection();
+
+    expect(result).toEqual({ ok: true, message: "Connection OK" });
+    expect(mockFetch.mock.calls[0][0]).toContain("/api/admin/email-settings/test");
+    expect(mockFetch.mock.calls[0][1].method).toBe("POST");
+  });
+
+  it("returns ok false with message on server failure", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      json: async () => ({ message: "SMTP unreachable" }),
+    });
+
+    const result = await testEmailConnection();
+    expect(result).toEqual({ ok: false, message: "SMTP unreachable" });
+  });
+
+  it("returns network error on exception", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("offline"));
+
+    const result = await testEmailConnection();
+    expect(result).toEqual({ ok: false, message: "Network error." });
+  });
+});
+
+describe("adminRestoreBooking", () => {
+  it("posts to restore endpoint and returns true", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true });
+    const result = await adminRestoreBooking(5);
+    expect(result).toBe(true);
+    expect(mockFetch.mock.calls[0][0]).toContain("/api/admin/bookings/5/restore");
+  });
+
+  it("throws error with server message on failure", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      json: async () => ({ message: "Cannot restore past booking" }),
+    });
+    await expect(adminRestoreBooking(5)).rejects.toThrow("Cannot restore past booking");
+  });
+
+  it("throws generic error when JSON fails on non-ok response", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      json: async () => {
+        throw new Error("no json");
+      },
+    });
+    await expect(adminRestoreBooking(5)).rejects.toThrow("Failed to restore booking");
+  });
+});
+
+describe("adminUpdateBookingFull", () => {
+  const req = { partySize: 10 };
+
+  it("puts to booking endpoint and returns updated data", async () => {
+    const updated = { id: 5, partySize: 10 };
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => updated });
+    const result = await adminUpdateBookingFull(5, req);
+    expect(result).toEqual(updated);
+    expect(mockFetch.mock.calls[0][1].method).toBe("PUT");
+  });
+
+  it("throws error on failure", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      json: async () => ({ message: "Resource too small" }),
+    });
+    await expect(adminUpdateBookingFull(5, req)).rejects.toThrow("Resource too small");
+  });
+
+  it("throws generic error when JSON fails", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      json: async () => {
+        throw new Error();
+      },
+    });
+    await expect(adminUpdateBookingFull(5, req)).rejects.toThrow("Failed to update booking");
+  });
+});
+
+describe("adminGetVenues", () => {
+  it("fetches locations list", async () => {
+    const list = [{ id: 1, name: "R1" }];
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => list });
+    const result = await adminGetVenues();
+    expect(result).toEqual(list);
+  });
+
+  it("returns empty array on error", async () => {
+    mockFetch.mockRejectedValueOnce(new Error());
+    expect(await adminGetVenues()).toEqual([]);
+  });
+});
+
+describe("adminGetSections", () => {
+  it("fetches sections for location", async () => {
+    const list = [{ id: 1, name: "S1" }];
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => list });
+    const result = await adminGetSections(2);
+    expect(result).toEqual(list);
+    expect(mockFetch.mock.calls[0][0]).toContain("/api/admin/venues/2/sections");
+  });
+
+  it("returns empty array on error", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false });
+    expect(await adminGetSections(2)).toEqual([]);
+  });
+
+  it("returns empty array on network error", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("offline"));
+    expect(await adminGetSections(2)).toEqual([]);
+  });
+});
+describe("brand settings", () => {
+  const brandData = { appName: "My Location", primaryColor: "#ff0000" };
+
+  it("patches brand settings and returns response", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ message: "Saved" }) });
+
+    const result = await saveBrandSettings(brandData);
+
+    expect(result).toEqual({ ok: true, data: { message: "Saved" } });
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toContain("/api/brand");
+    expect(opts.method).toBe("PATCH");
+    expect(JSON.parse(opts.body)).toEqual(brandData);
+  });
+
+  it("returns error message on non-ok response", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      json: async () => ({ message: "Invalid color" }),
+    });
+
+    const result = await saveBrandSettings(brandData);
+    expect(result).toEqual({ ok: false, message: "Invalid color" });
+  });
+
+  it("returns fallback message when json fails on non-ok response", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      json: async () => {
+        throw new Error("no json");
+      },
+    });
+
+    const result = await saveBrandSettings(brandData);
+    expect(result).toEqual({ ok: false, message: "Failed to save." });
+  });
+
+  it("returns null on network error", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("offline"));
+    expect(await saveBrandSettings(brandData)).toBeNull();
+  });
+});
+
+// ---------- Highlights ----------
+
+describe("adminGetHighlights", () => {
+  it("returns parsed highlights on success", async () => {
+    const mockHighlights = [
+      {
+        id: 1,
+        title: "Natural light",
+        body: "Bright rooms all day.",
+        iconKey: "flame-outline",
+        sortOrder: 0,
+      },
+    ];
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => mockHighlights });
+    const result = await adminGetHighlights();
+    expect(result).toEqual(mockHighlights);
+  });
+
+  it("returns empty array on non-ok response", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false });
+    const result = await adminGetHighlights();
+    expect(result).toEqual([]);
+  });
+
+  it("returns empty array on network error", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("network"));
+    const result = await adminGetHighlights();
+    expect(result).toEqual([]);
+  });
+});
+
+describe("adminCreateHighlight", () => {
+  const req = { title: "Test", body: "Body", iconKey: "star-outline", sortOrder: 0 };
+
+  it("returns created highlight on success", async () => {
+    const created = { id: 5, ...req };
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => created });
+    const result = await adminCreateHighlight(req);
+    expect(result).toEqual({ ok: true, data: created });
+  });
+
+  it("returns the server error message on non-ok response", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      json: async () => ({ message: "Highlight title cannot exceed 60 characters." }),
+    });
+    const result = await adminCreateHighlight(req);
+    expect(result).toEqual({ ok: false, message: "Highlight title cannot exceed 60 characters." });
+  });
+
+  it("returns null on network error", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("network"));
+    const result = await adminCreateHighlight(req);
+    expect(result).toBeNull();
+  });
+});
+
+describe("adminUpdateHighlight", () => {
+  const req = { title: "Updated", body: "New body", iconKey: "heart-outline", sortOrder: 1 };
+
+  it("returns updated highlight on success", async () => {
+    const updated = { id: 3, ...req };
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => updated });
+    const result = await adminUpdateHighlight(3, req);
+    expect(result).toEqual({ ok: true, data: updated });
+  });
+
+  it("returns the server error message on non-ok response", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      json: async () => ({ message: "Icon key must be one of the supported icons." }),
+    });
+    const result = await adminUpdateHighlight(3, req);
+    expect(result).toEqual({ ok: false, message: "Icon key must be one of the supported icons." });
+  });
+
+  it("returns null on network error", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("network"));
+    const result = await adminUpdateHighlight(3, req);
+    expect(result).toBeNull();
+  });
+});
+
+describe("adminDeleteHighlight", () => {
+  it("returns true when delete succeeds", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true });
+    const result = await adminDeleteHighlight(1);
+    expect(result).toBe(true);
+  });
+
+  it("returns false when delete fails", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false });
+    const result = await adminDeleteHighlight(1);
+    expect(result).toBe(false);
+  });
+
+  it("returns false on network error", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("network"));
+    const result = await adminDeleteHighlight(1);
+    expect(result).toBe(false);
+  });
+});
+
+// ---------- Lookup / new booking helpers ----------
+
+describe("adminLookupBookings", () => {
+  // One free-text param whatever the admin typed. Splitting the term into email-vs-reference on
+  // the client is what stopped a partial email — and any customer name at all — from matching.
+  it.each([
+    ["a partial email", "user@exam"],
+    ["a partial reference", "swift-ced"],
+    ["a customer name", "Ada Lovelace"],
+  ])("sends %s as the single query param", async (_label, term) => {
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => [] });
+
+    await adminLookupBookings(term);
+
+    const url = mockFetch.mock.calls[0][0] as string;
+    expect(url).toContain(new URLSearchParams({ query: term }).toString());
+    expect(url).not.toContain("email=");
+    expect(url).not.toContain("bookingRef=");
+    expect(url).toContain("status=all");
+  });
+
+  it("returns empty array on network error", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("offline"));
+    expect(await adminLookupBookings("REF999")).toEqual([]);
+  });
+});
+
+describe("sendBookingEmail", () => {
+  it("posts to /admin/bookings/{id}/email and returns ok + message", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ message: "Email sent" }),
+    });
+
+    const result = await sendBookingEmail(7, "Subject", "Body text");
+
+    expect(result).toEqual({ ok: true, message: "Email sent" });
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toContain("/api/admin/bookings/7/email");
+    expect(opts.method).toBe("POST");
+    expect(JSON.parse(opts.body)).toEqual({ subject: "Subject", body: "Body text" });
+  });
+
+  it("returns ok false with server message on non-ok response", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      json: async () => ({ message: "Delivery failed" }),
+    });
+
+    const result = await sendBookingEmail(7, "Subject", "Body");
+    expect(result).toEqual({ ok: false, message: "Delivery failed" });
+  });
+
+  it("returns ok false with network error message on exception", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("offline"));
+
+    const result = await sendBookingEmail(7, "Subject", "Body");
+    expect(result).toEqual({ ok: false, message: "Network error." });
+  });
+});
+
+describe("pauseVenueBookings", () => {
+  it("posts to /admin/locations/{id}/pause and returns true on success", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true });
+
+    const result = await pauseVenueBookings(3, 30);
+
+    expect(result).toBe(true);
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toContain("/api/admin/venues/3/pause");
+    expect(opts.method).toBe("POST");
+    expect(JSON.parse(opts.body)).toEqual({ minutes: 30 });
+  });
+
+  it("returns false on non-ok response", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false });
+    expect(await pauseVenueBookings(3, 30)).toBe(false);
+  });
+
+  it("returns false on network error", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("offline"));
+    expect(await pauseVenueBookings(3, 30)).toBe(false);
+  });
+});
+
+describe("unpauseVenueBookings", () => {
+  it("posts to /admin/locations/{id}/unpause and returns true on success", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true });
+
+    const result = await unpauseVenueBookings(3);
+
+    expect(result).toBe(true);
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toContain("/api/admin/venues/3/unpause");
+    expect(opts.method).toBe("POST");
+  });
+
+  it("returns false on non-ok response", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false });
+    expect(await unpauseVenueBookings(3)).toBe(false);
+  });
+
+  it("returns false on network error", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("offline"));
+    expect(await unpauseVenueBookings(3)).toBe(false);
+  });
+});
+
+describe("extendVenueBookings", () => {
+  it("posts to /admin/locations/{id}/extend and returns ok with extendedBookings", async () => {
+    const bookings = [{ id: 1 }, { id: 2 }];
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ extendedBookings: bookings }),
+    });
+
+    const result = await extendVenueBookings(4, 15);
+
+    expect(result).toEqual({ ok: true, extendedBookings: bookings });
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toContain("/api/admin/venues/4/extend");
+    expect(opts.method).toBe("POST");
+    expect(JSON.parse(opts.body)).toEqual({ minutes: 15 });
+  });
+
+  it("returns ok false with empty array on non-ok response", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false });
+
+    const result = await extendVenueBookings(4, 15);
+    expect(result).toEqual({ ok: false, extendedBookings: [] });
+  });
+
+  it("returns ok false with empty array on network error", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("offline"));
+
+    const result = await extendVenueBookings(4, 15);
+    expect(result).toEqual({ ok: false, extendedBookings: [] });
+  });
+
+  it("falls back to empty array when extendedBookings is absent from response", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({}) });
+
+    const result = await extendVenueBookings(4, 15);
+    expect(result).toEqual({ ok: true, extendedBookings: [] });
+  });
+});
+
+describe("getEmailFailures", () => {
+  it("fetches GET /admin/email-settings/failures and returns array", async () => {
+    const failures = [
+      {
+        id: 1,
+        bookingRef: "REF001",
+        recipientEmail: "a@b.com",
+        errorMessage: "SMTP timeout",
+        attemptedAt: "2026-05-01T10:00:00Z",
+      },
+    ];
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => failures });
+
+    const result = await getEmailFailures();
+
+    expect(result).toEqual(failures);
+    expect(mockFetch.mock.calls[0][0]).toContain("/api/admin/email-settings/failures");
+  });
+
+  it("returns empty array on non-ok response", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false });
+    expect(await getEmailFailures()).toEqual([]);
+  });
+
+  it("returns empty array on network error", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("offline"));
+    expect(await getEmailFailures()).toEqual([]);
+  });
+});
+
+describe("uploadHeroImage", () => {
+  it("posts multipart to /api/media/hero and returns url on success", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ url: "https://cdn.example.com/hero.jpg" }),
+    });
+
+    const file = new File(["img"], "hero.jpg", { type: "image/jpeg" });
+    const result = await uploadHeroImage(file);
+
+    expect(result).toBe("https://cdn.example.com/hero.jpg");
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toContain("/api/media/hero");
+    expect(opts.method).toBe("POST");
+    expect(opts.credentials).toBe("include");
+  });
+
+  it("returns null on non-ok response", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false });
+    const file = new File(["img"], "hero.jpg", { type: "image/jpeg" });
+    expect(await uploadHeroImage(file)).toBeNull();
+  });
+
+  it("returns null on network error", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("offline"));
+    const file = new File(["img"], "hero.jpg", { type: "image/jpeg" });
+    expect(await uploadHeroImage(file)).toBeNull();
+  });
+
+  it("returns null when url is absent from response", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({}) });
+    const file = new File(["img"], "hero.jpg", { type: "image/jpeg" });
+    expect(await uploadHeroImage(file)).toBeNull();
+  });
+});
+
+describe("deleteHeroImage", () => {
+  it("sends DELETE to /api/media/hero and returns true on success", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true });
+
+    const result = await deleteHeroImage();
+
+    expect(result).toBe(true);
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toContain("/api/media/hero");
+    expect(opts.method).toBe("DELETE");
+    expect(opts.credentials).toBe("include");
+  });
+
+  it("returns false on non-ok response", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false });
+    expect(await deleteHeroImage()).toBe(false);
+  });
+
+  it("returns false on network error", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("offline"));
+    expect(await deleteHeroImage()).toBe(false);
+  });
+});
+
+// ---------- Social Links ----------
+
+describe("adminGetSocialLinks", () => {
+  it("returns parsed social links on success", async () => {
+    const links = [
+      {
+        id: 1,
+        label: "Instagram",
+        url: "https://instagram.com/r",
+        iconKey: "instagram",
+        sortOrder: 0,
+      },
+    ];
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => links });
+
+    const result = await adminGetSocialLinks();
+
+    expect(result).toEqual(links);
+    expect(mockFetch.mock.calls[0][0]).toContain("/api/social-links");
+  });
+
+  it("returns empty array on non-ok response", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false });
+    expect(await adminGetSocialLinks()).toEqual([]);
+  });
+
+  it("returns empty array on network error", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("offline"));
+    expect(await adminGetSocialLinks()).toEqual([]);
+  });
+});
+
+describe("adminCreateSocialLink", () => {
+  const req = {
+    label: "Instagram",
+    url: "https://instagram.com/r",
+    iconKey: "instagram",
+    sortOrder: 0,
+  };
+
+  it("returns created social link on success", async () => {
+    const created = { id: 5, ...req };
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => created });
+
+    const result = await adminCreateSocialLink(req);
+
+    expect(result).toEqual({ ok: true, data: created });
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toContain("/api/social-links");
+    expect(opts.method).toBe("POST");
+    expect(JSON.parse(opts.body)).toEqual(req);
+  });
+
+  it("returns the server error message on non-ok response", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      json: async () => ({ message: "Social link URL must be a valid absolute URL." }),
+    });
+    expect(await adminCreateSocialLink(req)).toEqual({
+      ok: false,
+      message: "Social link URL must be a valid absolute URL.",
+    });
+  });
+
+  it("returns null on network error", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("offline"));
+    expect(await adminCreateSocialLink(req)).toBeNull();
+  });
+});
+
+describe("adminUpdateSocialLink", () => {
+  const req = {
+    label: "Facebook",
+    url: "https://facebook.com/r",
+    iconKey: "facebook",
+    sortOrder: 1,
+  };
+
+  it("returns updated social link on success", async () => {
+    const updated = { id: 3, ...req };
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => updated });
+
+    const result = await adminUpdateSocialLink(3, req);
+
+    expect(result).toEqual({ ok: true, data: updated });
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toContain("/api/social-links/3");
+    expect(opts.method).toBe("PUT");
+    expect(JSON.parse(opts.body)).toEqual(req);
+  });
+
+  it("returns the server error message on non-ok response", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      json: async () => ({ message: "Social link label cannot be empty." }),
+    });
+    expect(await adminUpdateSocialLink(3, req)).toEqual({
+      ok: false,
+      message: "Social link label cannot be empty.",
+    });
+  });
+
+  it("returns null on network error", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("offline"));
+    expect(await adminUpdateSocialLink(3, req)).toBeNull();
+  });
+});
+
+describe("adminDeleteSocialLink", () => {
+  it("returns true when delete succeeds", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true });
+
+    const result = await adminDeleteSocialLink(1);
+
+    expect(result).toBe(true);
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toContain("/api/social-links/1");
+    expect(opts.method).toBe("DELETE");
+  });
+
+  it("returns false when delete fails", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false });
+    expect(await adminDeleteSocialLink(1)).toBe(false);
+  });
+
+  it("returns false on network error", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("offline"));
+    expect(await adminDeleteSocialLink(1)).toBe(false);
+  });
+});

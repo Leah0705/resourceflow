@@ -1,0 +1,660 @@
+import { ThemedText } from "@/components/themed-text";
+import { useTranslation } from "react-i18next";
+import Button from "@/components/common/Button";
+import {
+  getAdminBookings,
+  adminDeleteBooking,
+  adminLookupBookings,
+  BookingDetailDto,
+  BookingStatusFilter,
+} from "@/api/admin";
+import { fetchVenues, VenueDto } from "@/api/venues";
+import { getHoursForDay } from "@/utils/openingHours";
+import ConfirmModal from "@/components/common/ConfirmModal";
+import AlertModal from "@/components/common/AlertModal";
+import { NewBookingModal } from "@/components/admin/bookings/NewBookingModal";
+import { useEffect, useRef, useState } from "react";
+import { usePersistedState } from "@/hooks/use-persisted-state";
+import { useBookingsGrid } from "@/hooks/use-bookings-grid";
+import {
+  ActivityIndicator,
+  Pressable,
+  ScrollView,
+  useWindowDimensions,
+  View,
+  Platform,
+} from "react-native";
+import { useRouter, Stack, useLocalSearchParams } from "expo-router";
+import { useAppTheme } from "@/hooks/use-app-theme";
+
+import { AvailabilityGrid } from "@/components/admin/bookings/AvailabilityGrid";
+import { ServiceView } from "@/components/admin/bookings/ServiceView";
+import { GridDateBar } from "@/components/admin/bookings/GridDateBar";
+import { BookingStatusTabs } from "@/components/admin/bookings/BookingStatusTabs";
+import { BookingDetailPopup } from "@/components/admin/bookings/BookingDetailPopup";
+import { BookingsWideTable } from "@/components/admin/bookings/BookingsWideTable";
+import { BookingsCardList } from "@/components/admin/bookings/BookingsCardList";
+import { BookingLookupBar } from "@/components/admin/bookings/BookingLookupBar";
+import {
+  defaultSortFor,
+  nextSort,
+  sortBookings,
+  type SortKey,
+  type SortState,
+} from "@/components/admin/bookings/sorting";
+import { styles } from "@/components/admin/bookings/bookings.styles";
+import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
+import { useErrorHandler } from "@/hooks/useErrorHandler";
+import { fmtDate, isoDate } from "@/utils/formatters";
+import { Icon } from "@/components/common/Icon";
+
+type ViewMode = "timetable" | "service" | "list";
+
+/**
+ * Modes drawn from the grid fetch (sections + that day's bookings) rather than the list fetch, so
+ * both have to load the grid on entry, on a location switch and after a mutation.
+ */
+const GRID_MODES: readonly ViewMode[] = ["timetable", "service"];
+
+function usesGrid(mode: ViewMode): boolean {
+  return GRID_MODES.includes(mode);
+}
+
+export default function AdminBookingsScreen() {
+  const { t } = useTranslation();
+  const [venues, setVenues] = useState<VenueDto[]>([]);
+  const [selectedVenueId, setSelectedVenueId] = useState<number | null>(null);
+  const [persistedVenueId, setPersistedVenueId] = usePersistedState<number | null>(
+    "bookings:venueId",
+    null
+  );
+  const [bookings, setBookings] = useState<BookingDetailDto[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [viewMode, setViewMode] = usePersistedState<ViewMode>("bookings:viewMode", "timetable");
+  const [statusFilter, setStatusFilter] = usePersistedState<BookingStatusFilter>(
+    "bookings:statusFilter",
+    "active"
+  );
+  // Sort preference persists across sessions but resets to the contextual
+  // default whenever the status filter changes (see effect below) — so the
+  // "past" tab still defaults to most-recent-first, etc.
+  const [sort, setSort] = usePersistedState<SortState>(
+    "bookings:sort",
+    defaultSortFor(statusFilter)
+  );
+
+  const [selectedBookingId, setSelectedBookingId] = useState<number | null>(null);
+  const [cancelTarget, setCancelTarget] = useState<BookingDetailDto | null>(null);
+  const [showNewModal, setShowNewModal] = useState(false);
+  const { errorMessage, showError, clearError } = useErrorHandler();
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [focusedRowId, setFocusedRowId] = useState<number | null>(null);
+  const [detailInitialFocus, setDetailInitialFocus] = useState<"extend" | undefined>(undefined);
+
+  const [lookupQuery, setLookupQuery] = useState("");
+  const [lookupLoading, setLookupLoading] = useState(false);
+  const [lookupStatus, setLookupStatus] = useState<"idle" | "not_found" | "multiple">("idle");
+
+  const router = useRouter();
+  const {
+    create,
+    query: queryParam,
+    venueId: venueIdParam,
+  } = useLocalSearchParams<{
+    create?: string;
+    query?: string;
+    venueId?: string;
+  }>();
+  const searchQuery = queryParam || null;
+
+  // A search matches across every location and every date, which is exactly what the timetable
+  // cannot draw — it renders one location on one day. So a search forces the list regardless of
+  // the persisted toggle, and the location chips, status tabs and view toggle come down with it:
+  // the search fetch ignores all three, so leaving them up offers filters that do nothing.
+  const effectiveViewMode: ViewMode = searchQuery ? "list" : viewMode;
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (create === "1") setShowNewModal(true);
+  }, [create]);
+
+  const { colors, isDark, primaryColor: PRIMARY } = useAppTheme();
+  const { width } = useWindowDimensions();
+
+  const {
+    gridDate,
+    gridSections,
+    gridBookings,
+    gridLoading,
+    loadGrid,
+    handleGridDateChange,
+    resetToToday,
+  } = useBookingsGrid({ venueId: selectedVenueId, viewMode: effectiveViewMode });
+
+  const selectedVenue = venues.find((r) => r.id === selectedVenueId);
+  const gridIsoDay = gridDate.getDay() === 0 ? 7 : gridDate.getDay();
+  const gridDayHours = getHoursForDay(selectedVenue ?? {}, gridIsoDay);
+  const openTime = gridDayHours.open;
+  const closeTime = gridDayHours.close;
+  const timezone = selectedVenue?.timezone ?? "UTC";
+
+  const borderColor = colors.border;
+  const cardBg = colors.card;
+  const mutedColor = colors.muted;
+  const isWide = width >= 640;
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchVenues().then((data) => {
+      if (cancelled) return;
+      setVenues(data);
+      const paramId = venueIdParam ? parseInt(venueIdParam, 10) : NaN;
+      const paramMatch = !isNaN(paramId) && data.find((r) => r.id === paramId);
+      const persistedMatch =
+        !paramMatch && persistedVenueId != null
+          ? data.find((r) => r.id === persistedVenueId)
+          : undefined;
+      const nextId = paramMatch
+        ? paramMatch.id
+        : persistedMatch
+          ? persistedMatch.id
+          : (data[0]?.id ?? null);
+      setSelectedVenueId(nextId);
+      setPersistedVenueId(nextId);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // persistedVenueId seeds the initial selection only; omitting it avoids a refetch loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [venueIdParam]);
+
+  useEffect(() => {
+    if (searchQuery) {
+      let cancelled = false;
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setLoading(true);
+      getAdminBookings(undefined, undefined, "all", searchQuery).then((b) => {
+        if (!cancelled) {
+          setBookings(b);
+          setLoading(false);
+        }
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+    if (!selectedVenueId) return;
+    let cancelled = false;
+
+    setLoading(true);
+    getAdminBookings(selectedVenueId, undefined, statusFilter).then((b) => {
+      if (!cancelled) {
+        setBookings(b);
+        setLoading(false);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [statusFilter, selectedVenueId, searchQuery, refreshKey]);
+
+  const handleSelectVenue = (id: number) => {
+    if (id === selectedVenueId) return;
+    setSelectedVenueId(id);
+    setPersistedVenueId(id);
+    if (usesGrid(viewMode)) loadGrid(id, gridDate);
+  };
+
+  // When the user switches status filter, reset the sort to that tab's
+  // contextual default (e.g. past = most-recent-first). We deliberately do NOT
+  // fire on the initial mount — a sort preference persisted from a previous
+  // session should survive reload. `prevStatusFilter` starts undefined, so the
+  // first (mount) run is skipped; subsequent real changes trigger the reset.
+  const prevStatusFilter = useRef<BookingStatusFilter | undefined>(undefined);
+  useEffect(() => {
+    const prev = prevStatusFilter.current;
+    prevStatusFilter.current = statusFilter;
+    if (prev === undefined || prev === statusFilter) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSort(defaultSortFor(statusFilter));
+  }, [statusFilter, setSort]);
+
+  const switchToGridMode = (mode: ViewMode) => {
+    setViewMode(mode);
+    if (selectedVenueId) loadGrid(selectedVenueId, gridDate);
+  };
+
+  const reconcileAfterBookingMutation = () => {
+    setRefreshKey((key) => key + 1);
+    if (selectedVenueId && usesGrid(effectiveViewMode)) {
+      loadGrid(selectedVenueId, gridDate);
+    }
+  };
+
+  const sorted = sortBookings(bookings, sort);
+
+  const handleSortChange = (key: SortKey) => setSort((prev) => nextSort(prev, key));
+
+  // Only wired via useKeyboardShortcuts below when sorted.length > 0, so
+  // sorted is guaranteed non-empty whenever this actually runs.
+  const moveRowFocus = (delta: number) => {
+    setFocusedRowId((current) => {
+      const idx = current == null ? -1 : sorted.findIndex((b) => b.id === current);
+      const nextIdx = Math.min(Math.max(idx + delta, 0), sorted.length - 1);
+      return sorted[nextIdx].id;
+    });
+  };
+
+  const openBooking = (id: number, focus?: "extend") => {
+    setDetailInitialFocus(focus);
+    setSelectedBookingId(id);
+  };
+
+  const openFocusedRow = (focus?: "extend") => {
+    if (focusedRowId != null) openBooking(focusedRowId, focus);
+  };
+
+  // Suppressed whenever a booking popup or modal is already open — otherwise
+  // a stray j/k/Enter/e keypress (e.g. focus left on a non-text Pressable
+  // inside the open popup) can silently reassign selectedBookingId and swap
+  // which booking the popup displays underneath the user, with no visible
+  // cue (Concern 1).
+  const listShortcutsBlocked = selectedBookingId !== null || showNewModal || !!cancelTarget;
+
+  useKeyboardShortcuts(
+    effectiveViewMode === "list" && sorted.length > 0 && !listShortcutsBlocked
+      ? {
+          j: () => moveRowFocus(1),
+          ArrowDown: () => moveRowFocus(1),
+          k: () => moveRowFocus(-1),
+          ArrowUp: () => moveRowFocus(-1),
+          Enter: () => openFocusedRow(),
+          e: () => openFocusedRow("extend"),
+        }
+      : {}
+  );
+
+  const handleLookup = async () => {
+    const q = lookupQuery.trim();
+    if (!q) return;
+    setLookupLoading(true);
+    setLookupStatus("idle");
+    try {
+      const results = await adminLookupBookings(q);
+      if (results.length === 0) {
+        setLookupStatus("not_found");
+      } else if (results.length === 1) {
+        setLookupQuery("");
+        setSelectedBookingId(results[0].id);
+      } else {
+        setLookupStatus("multiple");
+        router.replace({ pathname: "/admin/bookings", params: { query: q } });
+      }
+    } finally {
+      setLookupLoading(false);
+    }
+  };
+
+  const todayCount = bookings.filter((b) => {
+    const bd = new Date(b.date);
+    const today = new Date();
+    return (
+      bd.getDate() === today.getDate() &&
+      bd.getMonth() === today.getMonth() &&
+      bd.getFullYear() === today.getFullYear()
+    );
+  }).length;
+
+  return (
+    <ScrollView contentContainerStyle={styles.container}>
+      {Platform.OS !== "web" && (
+        <Stack.Screen
+          options={{
+            title: usesGrid(effectiveViewMode)
+              ? fmtDate(gridDate)
+              : statusFilter === "past"
+                ? t("admin.bookings.screenTitle.past")
+                : statusFilter === "cancelled"
+                  ? t("admin.bookings.screenTitle.cancelled")
+                  : statusFilter === "noshow"
+                    ? t("admin.bookings.screenTitle.noShow")
+                    : t("admin.bookings.screenTitle.live"),
+          }}
+        />
+      )}
+
+      <View style={styles.pageHeader}>
+        <View style={{ flex: 1 }}>
+          <ThemedText style={styles.pageTitle}>
+            {searchQuery ? t("admin.bookings.searchResultsTitle") : t("admin.bookings.pageTitle")}
+          </ThemedText>
+          <ThemedText style={[styles.pageSub, { color: mutedColor }]}>
+            {searchQuery
+              ? t("admin.bookings.searchResultsCount", {
+                  count: bookings.length,
+                  query: searchQuery,
+                })
+              : viewMode === "timetable"
+                ? fmtDate(gridDate)
+                : t("admin.bookings.totalTodaySummary", {
+                    total: bookings.length,
+                    today: todayCount,
+                  })}
+          </ThemedText>
+        </View>
+
+        <View style={styles.headerControls}>
+          <BookingLookupBar
+            query={lookupQuery}
+            loading={lookupLoading}
+            status={lookupStatus}
+            onQueryChange={(t) => {
+              setLookupQuery(t);
+              if (lookupStatus !== "idle") setLookupStatus("idle");
+            }}
+            onSubmit={handleLookup}
+            borderColor={colors.border}
+            inputBg={colors.input}
+            textColor={colors.text}
+            placeholderColor={colors.muted}
+            primaryColor={PRIMARY}
+          />
+
+          {searchQuery ? (
+            <Button
+              variant="secondary"
+              tone="neutral"
+              size="md"
+              icon="close-outline"
+              onPress={() => router.replace("/admin/bookings")}
+              accessibilityLabel={t("admin.bookings.clearSearchLabel")}
+            >
+              {t("admin.bookings.clearSearch")}
+            </Button>
+          ) : (
+            <Button
+              size="md"
+              icon="add-outline"
+              onPress={() => setShowNewModal(true)}
+              accessibilityLabel={t("admin.bookings.newBookingLabel")}
+            >
+              {t("admin.bookings.newBooking")}
+            </Button>
+          )}
+        </View>
+      </View>
+
+      {!searchQuery && (
+        <View style={styles.filterBar} testID="bookings-toolbar">
+          {venues.length > 1 && (
+            <View style={styles.locationChips}>
+              {venues.map((r) => (
+                <Pressable
+                  key={r.id}
+                  style={[
+                    styles.chip,
+                    { borderColor },
+                    r.id === selectedVenueId && {
+                      backgroundColor: PRIMARY,
+                      borderColor: PRIMARY,
+                    },
+                  ]}
+                  onPress={() => handleSelectVenue(r.id)}
+                >
+                  <ThemedText
+                    style={
+                      r.id === selectedVenueId
+                        ? styles.chipTextActive
+                        : [styles.chipText, { color: mutedColor }]
+                    }
+                  >
+                    {r.name}
+                  </ThemedText>
+                </Pressable>
+              ))}
+            </View>
+          )}
+
+          <View style={styles.viewControls}>
+            <View style={[styles.modeToggle, { borderColor, backgroundColor: cardBg }]}>
+              {(
+                [
+                  { key: "timetable", icon: "grid-outline" },
+                  { key: "service", icon: "business-outline" },
+                  { key: "list", icon: "list-outline" },
+                ] as const
+              ).map(({ key, icon }) => (
+                <Pressable
+                  key={key}
+                  testID={`view-toggle-${key}`}
+                  style={[styles.modeBtn, viewMode === key && { backgroundColor: PRIMARY }]}
+                  onPress={() => (usesGrid(key) ? switchToGridMode(key) : setViewMode(key))}
+                  accessibilityRole="radio"
+                  accessibilityLabel={t(`admin.bookings.viewToggle.${key}Label`)}
+                  accessibilityState={{ checked: viewMode === key }}
+                >
+                  <Icon name={icon} size={15} color={viewMode === key ? "#fff" : mutedColor} />
+                  {isWide && (
+                    <ThemedText
+                      style={[
+                        styles.modeBtnText,
+                        { color: viewMode === key ? "#fff" : mutedColor },
+                      ]}
+                    >
+                      {t(`admin.bookings.viewToggle.${key}`)}
+                    </ThemedText>
+                  )}
+                </Pressable>
+              ))}
+            </View>
+          </View>
+        </View>
+      )}
+
+      {effectiveViewMode === "list" && !searchQuery && (
+        <BookingStatusTabs
+          value={statusFilter}
+          onChange={setStatusFilter}
+          borderColor={borderColor}
+          cardBg={cardBg}
+          mutedColor={mutedColor}
+          primaryColor={PRIMARY}
+        />
+      )}
+
+      {loading && effectiveViewMode === "list" ? (
+        <ActivityIndicator style={styles.spinner} size="large" color={PRIMARY} />
+      ) : usesGrid(effectiveViewMode) ? (
+        <View style={[styles.gridCard, { backgroundColor: cardBg, borderColor }]}>
+          <GridDateBar
+            date={gridDate}
+            onChangeDay={handleGridDateChange}
+            onResetToToday={resetToToday}
+            borderColor={borderColor}
+            primaryColor={PRIMARY}
+          />
+
+          {gridLoading ? (
+            <ActivityIndicator style={{ padding: 40 }} size="large" color={PRIMARY} />
+          ) : effectiveViewMode === "service" ? (
+            <ServiceView
+              sections={gridSections}
+              bookings={gridBookings}
+              isDark={isDark}
+              onBookingPress={(b) => openBooking(b.id)}
+              groups={selectedVenue?.groups ?? []}
+              openTime={openTime}
+              closeTime={closeTime}
+              timezone={timezone}
+              defaultDurationMinutes={selectedVenue?.defaultBookingDurationMinutes ?? 90}
+              gridDateIso={isoDate(gridDate)}
+              dateLabel={fmtDate(gridDate)}
+            />
+          ) : (
+            <>
+              <View style={[styles.gridLegend, { borderBottomColor: borderColor }]}>
+                <View
+                  style={[
+                    styles.legendItem,
+                    {
+                      backgroundColor: `${PRIMARY}22`,
+                      borderRadius: 6,
+                      paddingHorizontal: 8,
+                      paddingVertical: 4,
+                    },
+                  ]}
+                >
+                  <View style={[styles.legendDot, { backgroundColor: PRIMARY }]} />
+                  <ThemedText style={[styles.legendText, { color: mutedColor }]}>
+                    {t("admin.bookings.timetable.legend.inUseNow")}
+                  </ThemedText>
+                </View>
+                <View
+                  style={[
+                    styles.legendItem,
+                    { borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4 },
+                  ]}
+                >
+                  <View style={[styles.legendDot, { backgroundColor: `${PRIMARY}44` }]} />
+                  <ThemedText style={[styles.legendText, { color: mutedColor }]}>
+                    {t("admin.bookings.timetable.legend.booked")}
+                  </ThemedText>
+                </View>
+                <View
+                  style={[
+                    styles.legendItem,
+                    { borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4 },
+                  ]}
+                >
+                  <View
+                    style={[
+                      styles.legendDot,
+                      { width: 3, backgroundColor: colors.error, borderRadius: 0 },
+                    ]}
+                  />
+                  <ThemedText style={[styles.legendText, { color: mutedColor }]}>
+                    {t("admin.bookings.timetable.legend.now")}
+                  </ThemedText>
+                </View>
+                <ThemedText style={[styles.legendText, { color: mutedColor, marginLeft: 4 }]}>
+                  {t("admin.bookings.timetable.legend.tapHint")}
+                </ThemedText>
+              </View>
+              <AvailabilityGrid
+                sections={gridSections}
+                bookings={gridBookings}
+                isDark={isDark}
+                onBookingPress={(b) => openBooking(b.id)}
+                groups={selectedVenue?.groups ?? []}
+                openTime={openTime}
+                closeTime={closeTime}
+                timezone={timezone}
+                defaultDurationMinutes={selectedVenue?.defaultBookingDurationMinutes ?? 90}
+                gridDateIso={isoDate(gridDate)}
+                dateLabel={fmtDate(gridDate)}
+              />
+            </>
+          )}
+        </View>
+      ) : sorted.length === 0 ? (
+        <View style={styles.emptyState}>
+          <Icon name="calendar-outline" size={40} color={mutedColor} />
+          <ThemedText style={[styles.emptyText, { color: mutedColor }]}>
+            {t("admin.bookings.emptyState")}
+          </ThemedText>
+          <Button
+            size="md"
+            icon="add-outline"
+            style={styles.emptyStateAction}
+            onPress={() => setShowNewModal(true)}
+            accessibilityLabel={t("admin.bookings.newBookingLabel")}
+          >
+            {t("admin.bookings.newBooking")}
+          </Button>
+        </View>
+      ) : isWide ? (
+        <BookingsWideTable
+          bookings={sorted}
+          focusedRowId={focusedRowId}
+          onOpenBooking={(id) => openBooking(id)}
+          onCancelBooking={(b) => setCancelTarget(b)}
+          sort={sort}
+          onSortChange={handleSortChange}
+          borderColor={borderColor}
+          cardBg={cardBg}
+          mutedColor={mutedColor}
+          isDark={isDark}
+          primaryColor={PRIMARY}
+        />
+      ) : (
+        <BookingsCardList
+          bookings={sorted}
+          focusedRowId={focusedRowId}
+          onOpenBooking={(id) => openBooking(id)}
+          sort={sort}
+          onSortChange={handleSortChange}
+          borderColor={borderColor}
+          cardBg={cardBg}
+          mutedColor={mutedColor}
+          isDark={isDark}
+          primaryColor={PRIMARY}
+        />
+      )}
+
+      <BookingDetailPopup
+        bookingId={selectedBookingId}
+        onClose={() => {
+          setSelectedBookingId(null);
+          setDetailInitialFocus(undefined);
+        }}
+        onMutated={reconcileAfterBookingMutation}
+        initialFocus={detailInitialFocus}
+      />
+
+      <NewBookingModal
+        visible={showNewModal}
+        onClose={() => setShowNewModal(false)}
+        onCreated={(id) => {
+          setShowNewModal(false);
+          setSelectedBookingId(id);
+          reconcileAfterBookingMutation();
+        }}
+      />
+
+      <ConfirmModal
+        visible={!!cancelTarget}
+        title={t("admin.bookings.cancelBookingTitle")}
+        message={
+          cancelTarget
+            ? t("admin.bookings.cancelBookingConfirm", {
+                name: cancelTarget.customerName ?? cancelTarget.customerEmail,
+              })
+            : ""
+        }
+        confirmLabel={t("admin.bookings.cancelBookingTitle")}
+        cancelLabel={t("admin.bookings.keep")}
+        destructive
+        onConfirm={async () => {
+          if (!cancelTarget) return;
+          const id = cancelTarget.id;
+          setCancelTarget(null);
+          try {
+            await adminDeleteBooking(id);
+            reconcileAfterBookingMutation();
+          } catch (err) {
+            showError(err);
+          }
+        }}
+        onCancel={() => setCancelTarget(null)}
+      />
+
+      <AlertModal
+        visible={errorMessage !== null}
+        title={t("errors.title")}
+        message={errorMessage ?? ""}
+        onClose={clearError}
+      />
+    </ScrollView>
+  );
+}

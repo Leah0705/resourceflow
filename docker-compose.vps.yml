@@ -1,0 +1,77 @@
+volumes:
+  media_data:
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: ResourceFlowApi/Dockerfile
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - PORT=8080
+      - CORS_ORIGINS=https://${DOMAIN_NAME}
+      - JWT_KEY=${JWT_KEY}
+      - ADMIN_EMAIL=${ADMIN_EMAIL}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - CONNECTION_STRING=${CONNECTION_STRING:-Data Source=/data/resourceflow.db}
+      - DATA_PROTECTION_KEYS_PATH=/data/dp-keys
+      - Vapid__PublicKey=${VAPID_PUBLIC_KEY}
+      - Vapid__PrivateKey=${VAPID_PRIVATE_KEY}
+      - Vapid__Subject=${VAPID_SUBJECT}
+    volumes:
+      - ./data:/data
+      - media_data:/app/wwwroot/media
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: always
+
+  frontend:
+    build:
+      context: ./resourceflow-frontend
+      dockerfile: Dockerfile
+      args:
+        - EXPO_PUBLIC_API_URL=/api
+    environment:
+      - EXPO_PUBLIC_API_URL=/api
+      - PORT=8081
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: always
+
+  reverse-proxy:
+    build:
+      context: ./nginx-vps
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:8080:80"
+      - "127.0.0.1:8443:443"
+    environment:
+      - DOMAIN_NAME=${DOMAIN_NAME}
+      - BACKEND_HOST=backend
+      - BACKEND_PORT=8080
+      - FRONTEND_HOST=frontend
+      - FRONTEND_PORT=8081
+      - SSL_CERT_PATH=/etc/nginx/ssl/server.crt
+      - SSL_KEY_PATH=/etc/nginx/ssl/server.key
+      # nginx-vps is published on 127.0.0.1 only, so every request reaches it through a
+      # proxy on the host; trust the private ranges that proxy connects from.
+      - TRUSTED_PROXIES=${TRUSTED_PROXIES:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}
+    volumes:
+      - ${HOST_SSL_CERT_PATH}:/etc/nginx/ssl/server.crt:ro
+      - ${HOST_SSL_KEY_PATH}:/etc/nginx/ssl/server.key:ro
+      - media_data:/usr/share/nginx/html/media:ro
+    depends_on:
+      # Start-order only, deliberately not service_healthy: nginx resolves
+      # backend/frontend at startup and Docker registers their DNS at container
+      # creation, so waiting on healthchecks only lengthens the window where
+      # :8443 is unpublished and the public site 502s.
+      - backend
+      - frontend
+    restart: always

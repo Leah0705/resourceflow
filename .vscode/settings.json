@@ -1,0 +1,5 @@
+{
+  "jest.rootPath": "resourceflow-frontend",
+  "jest.jestCommandLine": "npm test --",
+  "files.eol": "\n"
+}

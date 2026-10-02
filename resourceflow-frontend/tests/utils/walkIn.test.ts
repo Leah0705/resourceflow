@@ -1,0 +1,123 @@
+import {
+  parseWalkInDays,
+  isWalkInOnlyOnDay,
+  isWalkInOnlyOnDate,
+  walkInDaysLabel,
+  walkInBadgeLabel,
+  onlineSections,
+  onlineGroups,
+} from "@/utils/walkIn";
+
+describe("parseWalkInDays", () => {
+  it("returns empty array for null/undefined/empty", () => {
+    expect(parseWalkInDays(undefined)).toEqual([]);
+    expect(parseWalkInDays(null)).toEqual([]);
+    expect(parseWalkInDays("")).toEqual([]);
+  });
+
+  it("parses comma-separated ISO days and ignores junk", () => {
+    expect(parseWalkInDays("6,7")).toEqual([6, 7]);
+    expect(parseWalkInDays(" 1 , 8, 0, abc, 3 ")).toEqual([1, 3]);
+  });
+});
+
+describe("isWalkInOnlyOnDay", () => {
+  it("is true for every day when walkInOnly is set", () => {
+    expect(isWalkInOnlyOnDay({ walkInOnly: true }, 3)).toBe(true);
+  });
+
+  it("matches only listed days otherwise", () => {
+    const r = { walkInDays: "6,7" };
+    expect(isWalkInOnlyOnDay(r, 6)).toBe(true);
+    expect(isWalkInOnlyOnDay(r, 7)).toBe(true);
+    expect(isWalkInOnlyOnDay(r, 1)).toBe(false);
+  });
+
+  it("is false when nothing is configured", () => {
+    expect(isWalkInOnlyOnDay({}, 6)).toBe(false);
+  });
+});
+
+describe("isWalkInOnlyOnDate", () => {
+  it("resolves the ISO day from a YYYY-MM-DD date", () => {
+    // 2026-06-20 is a Saturday (ISO 6), 2026-06-21 a Sunday (ISO 7)
+    const r = { walkInDays: "6" };
+    expect(isWalkInOnlyOnDate(r, "2026-06-20")).toBe(true);
+    expect(isWalkInOnlyOnDate(r, "2026-06-21")).toBe(false);
+  });
+});
+
+describe("walkInDaysLabel", () => {
+  it("returns null when no days are set", () => {
+    expect(walkInDaysLabel({})).toBeNull();
+    expect(walkInDaysLabel({ walkInDays: "" })).toBeNull();
+  });
+
+  it("names a single day", () => {
+    expect(walkInDaysLabel({ walkInDays: "7" })).toBe("Sundays");
+  });
+
+  it("joins multiple days with 'and'", () => {
+    expect(walkInDaysLabel({ walkInDays: "6,7" })).toBe("Saturdays and Sundays");
+    expect(walkInDaysLabel({ walkInDays: "1,3,5" })).toBe("Mon, Wed and Fri");
+  });
+
+  it("sorts and deduplicates", () => {
+    expect(walkInDaysLabel({ walkInDays: "7,6,6" })).toBe("Saturdays and Sundays");
+  });
+
+  it("collapses a run of consecutive days into a first–last range", () => {
+    // Mon,Tue,Wed is a single consecutive run of 3 -> "M–W" rather than named days.
+    expect(walkInDaysLabel({ walkInDays: "1,2,3" })).toBe("M–W");
+  });
+
+  it("groups mixed consecutive and standalone days into a comma-separated label", () => {
+    // 4+ days always route through the grouped-label path, consecutive or not:
+    // [1,2] groups into a range, [4] and [6] stay standalone single-letter days.
+    expect(walkInDaysLabel({ walkInDays: "1,2,4,6" })).toBe("M–T, T, Sat");
+  });
+});
+
+describe("walkInBadgeLabel", () => {
+  it("returns null when no walk-in policy is configured", () => {
+    expect(walkInBadgeLabel({})).toBeNull();
+  });
+
+  it("returns a plain label for a fully walk-in location", () => {
+    expect(walkInBadgeLabel({ walkInOnly: true })).toBe("Walk-ins only");
+  });
+
+  it("ignores walkInDays for a fully walk-in location", () => {
+    expect(walkInBadgeLabel({ walkInOnly: true, walkInDays: "6,7" })).toBe("Walk-ins only");
+  });
+
+  it("names the specific walk-in days for a conditional location", () => {
+    expect(walkInBadgeLabel({ walkInDays: "5" })).toBe("Walk-ins on Fridays");
+    expect(walkInBadgeLabel({ walkInDays: "6,7" })).toBe("Walk-ins on Saturdays and Sundays");
+  });
+});
+
+describe("online resources", () => {
+  const frontDesk = { id: 1, capacity: 2, walkInOnly: true };
+  const window = { id: 2, capacity: 4 };
+  const corner = { id: 3, capacity: 4 };
+  const venue = {
+    sections: [{ id: 1, name: "Main", sortOrder: 0, resources: [frontDesk, window, corner] }],
+    groups: [
+      { id: 1, combinedCapacity: 6, members: [frontDesk, window] },
+      { id: 2, combinedCapacity: 8, members: [window, corner] },
+    ],
+  };
+
+  it("leaves a walk-in-only resource out of its section", () => {
+    expect(onlineSections(venue)[0].resources.map((t) => t.id)).toEqual([2, 3]);
+  });
+
+  it("leaves out a group that would take a walk-in-only resource with it", () => {
+    expect(onlineGroups(venue).map((g) => g.id)).toEqual([2]);
+  });
+
+  it("treats a location without groups as having none", () => {
+    expect(onlineGroups({})).toEqual([]);
+  });
+});

@@ -1,0 +1,118 @@
+import React from "react";
+import { render, screen, fireEvent } from "@testing-library/react-native";
+import { StyleSheet, type ViewStyle } from "react-native";
+import CalendarActions from "@/components/booking/CalendarActions";
+import { VENDOR_BRANDS } from "@/constants/vendorBrands";
+import { useColorScheme } from "@/hooks/use-color-scheme";
+import { openExternal } from "@/utils/openExternal";
+
+jest.mock("@expo/vector-icons", () => ({
+  Ionicons: () => null,
+}));
+
+jest.mock("@/hooks/use-color-scheme", () => ({
+  useColorScheme: jest.fn(() => "light"),
+}));
+
+jest.mock("@/utils/openExternal", () => ({ openExternal: jest.fn() }));
+
+jest.mock("@/utils/calendar", () => ({
+  buildCalendarUrls: jest.fn(() => ({
+    googleUrl: "https://calendar.google.com/test",
+    outlookUrl: "https://outlook.com/test",
+    downloadIcs: jest.fn(),
+  })),
+}));
+
+const baseProps = {
+  bookingRef: "sunny-maple",
+  date: "2026-06-15T19:00:00Z",
+  partySize: 2,
+  venueName: "Test Venue",
+  venueAddress: "123 Main St",
+};
+
+const withDownloadIcs = (downloadIcs: jest.Mock) => {
+  const { buildCalendarUrls } = require("@/utils/calendar");
+  buildCalendarUrls.mockReturnValue({
+    googleUrl: "https://calendar.google.com/test",
+    outlookUrl: "https://outlook.com/test",
+    downloadIcs,
+  });
+};
+
+describe("CalendarActions", () => {
+  beforeEach(() => {
+    (openExternal as jest.Mock).mockClear();
+  });
+
+  it("offers all three destinations as named pills under one heading", () => {
+    render(<CalendarActions {...baseProps} />);
+    expect(screen.getByText("ADD TO CALENDAR")).toBeTruthy();
+    expect(screen.getByText("Google")).toBeTruthy();
+    expect(screen.getByText("Outlook")).toBeTruthy();
+    expect(screen.getByText(".ics")).toBeTruthy();
+  });
+
+  it("spells out what an .ics is for, for screen readers only", () => {
+    render(<CalendarActions {...baseProps} />);
+    // The pill stays short; the apps it covers move to the label rather than a sub-line,
+    // which is what made these full-width rows in the first place.
+    expect(
+      screen.getByLabelText("Download .ics for Apple Calendar, Thunderbird and others")
+    ).toBeTruthy();
+    expect(screen.queryByText("Apple Calendar, Thunderbird, etc.")).toBeNull();
+  });
+
+  it("hands the Google and Outlook URLs to the platform's own opener", () => {
+    // A new tab on web, the OS handler on native — the pills themselves are the same
+    // control on both, which is why they no longer sit behind a Platform.OS gate.
+    render(<CalendarActions {...baseProps} />);
+    fireEvent.press(screen.getByText("Google"));
+    expect(openExternal).toHaveBeenCalledWith("https://calendar.google.com/test");
+    fireEvent.press(screen.getByText("Outlook"));
+    expect(openExternal).toHaveBeenCalledWith("https://outlook.com/test");
+  });
+
+  it("calls downloadIcs when the .ics pill is pressed", () => {
+    const downloadIcs = jest.fn().mockResolvedValue(undefined);
+    withDownloadIcs(downloadIcs);
+    render(<CalendarActions {...baseProps} />);
+    fireEvent.press(screen.getByText(".ics"));
+    expect(downloadIcs).toHaveBeenCalled();
+  });
+
+  it("dresses the two service pills in their own brand colour, not the .ics", () => {
+    render(<CalendarActions {...baseProps} />);
+    const borderOf = (testID: string) =>
+      (StyleSheet.flatten(screen.getByTestId(testID).props.style) as ViewStyle).borderColor;
+
+    expect(borderOf("calendar-google-btn")).toBe(VENDOR_BRANDS.google);
+    expect(borderOf("calendar-outlook-btn")).toBe(VENDOR_BRANDS.microsoft);
+    // A file format has no brand to wear, so it keeps the neutral tone.
+    expect(borderOf("calendar-ics-btn")).not.toBe(VENDOR_BRANDS.google);
+  });
+
+  it("keeps the brand colours as they are in dark mode", () => {
+    // Somebody else's brand doesn't re-tint with our theme: these are spent on the outline
+    // and the glyph, which clear 3:1 against the card either way.
+    (useColorScheme as jest.Mock).mockReturnValue("dark");
+    render(<CalendarActions {...baseProps} />);
+    const border = (
+      StyleSheet.flatten(screen.getByTestId("calendar-google-btn").props.style) as ViewStyle
+    ).borderColor;
+    expect(border).toBe(VENDOR_BRANDS.google);
+    (useColorScheme as jest.Mock).mockReturnValue("light");
+  });
+
+  it("renders with specialRequests prop", () => {
+    render(<CalendarActions {...baseProps} specialRequests="projector needed" />);
+    expect(screen.getByText("Google")).toBeTruthy();
+  });
+
+  it("renders in dark mode", () => {
+    (useColorScheme as jest.Mock).mockReturnValueOnce("dark");
+    render(<CalendarActions {...baseProps} />);
+    expect(screen.getByText("Google")).toBeTruthy();
+  });
+});

@@ -1,0 +1,108 @@
+import { View } from "react-native";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
+import { ThemedText } from "@/components/themed-text";
+import { Icon, type IconName } from "@/components/common/Icon";
+import { BookingDto } from "@/api/bookings";
+import { VenueDto } from "@/api/venues";
+import i18n from "@/i18n";
+import { styles } from "./BookingSummaryHeader.styles";
+
+interface BookingSummaryHeaderProps {
+  booking: BookingDto;
+  venue: VenueDto | null;
+  statusLabel: string;
+  statusIcon: IconName;
+  statusColor: string;
+  mutedColor: string;
+  /** Wash behind the whole header, used to carry a cancelled/past state at card scale. */
+  tint?: string | null;
+}
+
+/**
+ * Where and what, in two lines: the venue heads the card and its address and resource
+ * collapse into one subline, so four separate label/value rows become the thing you read
+ * first. Section and resource join the address rather than standing alone — on their own
+ * they're two words of context, next to the address they're the rest of the directions.
+ */
+/**
+ * `t` defaults to the global i18next instance's own translator so this stays callable outside
+ * a React tree (existing tests call it directly).
+ */
+export function buildPlacementLine(
+  booking: BookingDto,
+  venue: VenueDto | null,
+  t: TFunction = i18n.t.bind(i18n)
+): string {
+  const placement = booking.resourceGroupId
+    ? (booking.resourceName ?? t("booking.summaryHeader.combinedResourcesFallback"))
+    : booking.resourceName;
+
+  return [venue?.address, booking.sectionName, placement].filter(Boolean).join(" · ");
+}
+
+export default function BookingSummaryHeader({
+  booking,
+  venue,
+  statusLabel,
+  statusIcon,
+  statusColor,
+  mutedColor,
+  tint = null,
+}: BookingSummaryHeaderProps) {
+  const { t } = useTranslation();
+
+  return (
+    <SummaryHeader
+      testID="booking-summary-header"
+      name={venue?.name}
+      subline={buildPlacementLine(booking, venue, t)}
+      statusLabel={statusLabel}
+      statusIcon={statusIcon}
+      statusColor={statusColor}
+      mutedColor={mutedColor}
+      tint={tint}
+    />
+  );
+}
+
+/** The header itself, shared with the waitlist ticket so the two cards read alike. */
+export function SummaryHeader({
+  testID,
+  name,
+  subline,
+  statusLabel,
+  statusIcon,
+  statusColor,
+  mutedColor,
+  tint = null,
+}: {
+  testID?: string;
+  name?: string;
+  subline?: string;
+  statusLabel: string;
+  statusIcon: IconName;
+  statusColor: string;
+  mutedColor: string;
+  tint?: string | null;
+}) {
+  return (
+    <View testID={testID} style={[styles.header, tint ? { backgroundColor: tint } : null]}>
+      {/* A lookup that couldn't resolve the venue has no name to head the card with,
+          so the outcome takes the headline rather than leaving an eyebrow floating over an
+          empty space. */}
+      {name ? (
+        <View style={styles.statusRow}>
+          <Icon name={statusIcon} size={15} color={statusColor} />
+          <ThemedText style={[styles.status, { color: statusColor }]}>{statusLabel}</ThemedText>
+        </View>
+      ) : null}
+
+      <ThemedText style={styles.name}>{name ?? statusLabel}</ThemedText>
+
+      {subline ? (
+        <ThemedText style={[styles.placement, { color: mutedColor }]}>{subline}</ThemedText>
+      ) : null}
+    </View>
+  );
+}

@@ -1,0 +1,47 @@
+{
+  "name": "resourceflow-cli",
+  "version": "2.3.0",
+  "description": "Command-line client for the ResourceFlow admin API, driven by admin API keys.",
+  "keywords": [
+    "resourceflow",
+    "resource-booking",
+    "reservations",
+    "booking",
+    "cli"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "resourceflow": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.test.js"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "generate:types": "node scripts/generate-types.mjs",
+    "test": "npm run build && node --test 'dist/**/*.test.js'",
+    "start": "node dist/index.js",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "openapi-typescript": "^7.4.4",
+    "typescript": "^5.7.2"
+  },
+  "overrides": {
+    "js-yaml": "^4.3.2"
+  },
+  "private": true
+}

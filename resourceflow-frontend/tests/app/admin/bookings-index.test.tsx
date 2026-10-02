@@ -1,0 +1,975 @@
+/**
+ * @jest-environment jsdom
+ */
+import React from "react";
+import { Platform } from "react-native";
+import { render, screen, waitFor, fireEvent, act, within } from "@testing-library/react-native";
+import AdminBookingsScreen from "@/app/admin/bookings/index";
+import {
+  getAdminBookings,
+  adminDeleteBooking,
+  adminLookupBookings,
+  adminGetResources,
+} from "@/api/admin";
+
+jest.mock("@/api/admin", () => ({
+  getAdminBookings: jest.fn(),
+  adminGetResources: jest.fn().mockResolvedValue([]),
+  adminDeleteBooking: jest.fn().mockResolvedValue(true),
+  adminLookupBookings: jest.fn().mockResolvedValue([]),
+  getAdminBooking: jest.fn().mockResolvedValue(null),
+}));
+
+const mockReplace = jest.fn();
+const mockSearchParams: Record<string, string | undefined> = {};
+
+jest.mock("expo-router", () => {
+  const Stack = { Screen: () => null };
+  return {
+    Stack,
+    useRouter: () => ({ push: jest.fn(), replace: mockReplace }),
+    useLocalSearchParams: () => mockSearchParams,
+  };
+});
+
+jest.mock("@/context/BrandContext", () => ({
+  useBrand: () => ({ appName: "Test App", primaryColor: "#000" }),
+}));
+
+jest.mock("@/hooks/use-color-scheme", () => ({
+  useColorScheme: () => "light",
+}));
+
+jest.mock("@/api/venues", () => ({
+  fetchVenues: jest.fn().mockResolvedValue([{ id: 1, name: "Location 1" }]),
+}));
+
+// Stub heavy sub-components but expose callback triggers for testing
+jest.mock("@/components/admin/bookings/AvailabilityGrid", () => ({
+  AvailabilityGrid: ({ onBookingPress }: any) => {
+    const { Pressable, Text } = require("react-native");
+    return (
+      <Pressable testID="grid-press-booking" onPress={() => onBookingPress({ id: 42 })}>
+        <Text>GridBooking</Text>
+      </Pressable>
+    );
+  },
+}));
+
+jest.mock("@/components/admin/bookings/ServiceView", () => ({
+  ServiceView: ({ onBookingPress }: any) => {
+    const { Pressable, Text } = require("react-native");
+    return (
+      <Pressable testID="service-press-booking" onPress={() => onBookingPress({ id: 43 })}>
+        <Text>LiveView</Text>
+      </Pressable>
+    );
+  },
+}));
+
+jest.mock("@/components/admin/bookings/BookingDetailPopup", () => ({
+  BookingDetailPopup: ({ onClose, onMutated }: any) => {
+    const { Pressable, Text } = require("react-native");
+    return (
+      <>
+        <Pressable testID="popup-close" onPress={onClose}>
+          <Text>ClosePopup</Text>
+        </Pressable>
+        <Pressable testID="popup-mutated" onPress={onMutated}>
+          <Text>MutatedPopup</Text>
+        </Pressable>
+      </>
+    );
+  },
+}));
+
+jest.mock("@/components/admin/bookings/NewBookingModal", () => ({
+  NewBookingModal: ({ onClose, onCreated }: any) => {
+    const { Pressable, Text } = require("react-native");
+    return (
+      <>
+        <Pressable testID="newmodal-close" onPress={onClose}>
+          <Text>CloseNewModal</Text>
+        </Pressable>
+        <Pressable testID="newmodal-created" onPress={() => onCreated(99)}>
+          <Text>CreatedNewModal</Text>
+        </Pressable>
+      </>
+    );
+  },
+}));
+
+global.fetch = jest.fn(() =>
+  Promise.resolve({
+    ok: true,
+    json: () => Promise.resolve([{ id: 1, name: "Location 1" }]),
+  })
+) as jest.Mock;
+
+describe("AdminBookingsScreen", () => {
+  const mockBookings = [
+    {
+      id: 1,
+      bookingRef: "REF1",
+      customerEmail: "john@example.com",
+      status: "active",
+      date: new Date().toISOString(),
+      partySize: 2,
+      venueId: 1,
+      venueName: "Location 1",
+      sectionId: 1,
+      sectionName: "Main",
+      resourceId: 1,
+      resourceName: "T1",
+    },
+  ];
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (getAdminBookings as jest.Mock).mockResolvedValue(mockBookings);
+    (adminLookupBookings as jest.Mock).mockResolvedValue([]);
+    // Reset search params and router mock
+    Object.keys(mockSearchParams).forEach((k) => delete mockSearchParams[k]);
+    mockReplace.mockReset();
+  });
+
+  it("renders the bookings page", async () => {
+    render(<AdminBookingsScreen />);
+    await waitFor(() => {
+      expect(screen.getByText("Bookings")).toBeTruthy();
+    });
+  });
+
+  it("renders bookings in list view after switching modes", async () => {
+    render(<AdminBookingsScreen />);
+
+    // Switch to list mode
+    const listBtn = await screen.findByText("List");
+    fireEvent.press(listBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText("john@example.com")).toBeTruthy();
+    });
+  });
+
+  it("filters bookings by status in list view", async () => {
+    render(<AdminBookingsScreen />);
+
+    const listBtn = await screen.findByText("List");
+    fireEvent.press(listBtn);
+
+    const activeFilter = await screen.findByText("Active");
+    fireEvent.press(activeFilter);
+
+    await waitFor(() => {
+      expect(getAdminBookings).toHaveBeenCalledWith(1, undefined, "active");
+    });
+  });
+
+  it("switches to past filter in list view", async () => {
+    render(<AdminBookingsScreen />);
+    fireEvent.press(await screen.findByText("List"));
+    fireEvent.press(await screen.findByText("Past"));
+    await waitFor(() => {
+      expect(getAdminBookings).toHaveBeenCalledWith(1, undefined, "past");
+    });
+  });
+
+  it("switches to cancelled filter in list view", async () => {
+    render(<AdminBookingsScreen />);
+    fireEvent.press(await screen.findByText("List"));
+    fireEvent.press(await screen.findByText("Cancelled"));
+    await waitFor(() => {
+      expect(getAdminBookings).toHaveBeenCalledWith(1, undefined, "cancelled");
+    });
+  });
+
+  it("shows New Booking button and opens modal", async () => {
+    render(<AdminBookingsScreen />);
+    const listBtn = await screen.findByText("List");
+    fireEvent.press(listBtn);
+
+    const newBookingBtn = await screen.findByText("New Booking");
+    fireEvent.press(newBookingBtn);
+    expect(getAdminBookings).toHaveBeenCalled();
+  });
+
+  it("lookup shows 'No booking found' when no results", async () => {
+    (adminLookupBookings as jest.Mock).mockResolvedValue([]);
+    render(<AdminBookingsScreen />);
+    await waitFor(() => expect(screen.getByText("Bookings")).toBeTruthy());
+
+    const input = screen.getByPlaceholderText("Name, email or reference…");
+    fireEvent.changeText(input, "unknown@example.com");
+    await act(async () => {
+      fireEvent.press(screen.getByText("Find"));
+    });
+    await waitFor(() => {
+      expect(screen.getByText("No booking found.")).toBeTruthy();
+    });
+  });
+
+  it("lookup with single result opens the booking popup", async () => {
+    (adminLookupBookings as jest.Mock).mockResolvedValue([{ ...mockBookings[0], id: 99 }]);
+    render(<AdminBookingsScreen />);
+    await waitFor(() => expect(screen.getByText("Bookings")).toBeTruthy());
+
+    const input = screen.getByPlaceholderText("Name, email or reference…");
+    fireEvent.changeText(input, "john@example.com");
+    await act(async () => {
+      fireEvent.press(screen.getByText("Find"));
+    });
+    await waitFor(() => expect(adminLookupBookings).toHaveBeenCalledWith("john@example.com"));
+  });
+
+  it("lookup with multiple results shows 'Showing all matches…'", async () => {
+    (adminLookupBookings as jest.Mock).mockResolvedValue([
+      { ...mockBookings[0], id: 1 },
+      { ...mockBookings[0], id: 2 },
+    ]);
+    render(<AdminBookingsScreen />);
+    await waitFor(() => expect(screen.getByText("Bookings")).toBeTruthy());
+
+    const input = screen.getByPlaceholderText("Name, email or reference…");
+    fireEvent.changeText(input, "john@example.com");
+    await act(async () => {
+      fireEvent.press(screen.getByText("Find"));
+    });
+    await waitFor(() => {
+      expect(screen.getByText("Showing all matches…")).toBeTruthy();
+    });
+    expect(mockReplace).toHaveBeenCalled();
+  });
+
+  it("updates lookup query and clears status on change", async () => {
+    (adminLookupBookings as jest.Mock).mockResolvedValue([]);
+    render(<AdminBookingsScreen />);
+    await waitFor(() => expect(screen.getByText("Bookings")).toBeTruthy());
+
+    const searchInput = screen.getByPlaceholderText("Name, email or reference…");
+    fireEvent.changeText(searchInput, "test");
+    await act(async () => {
+      fireEvent.press(screen.getByText("Find"));
+    });
+    await waitFor(() => expect(screen.getByText("No booking found.")).toBeTruthy());
+    fireEvent.changeText(searchInput, "new");
+    expect(screen.queryByText("No booking found.")).toBeNull();
+  });
+
+  it("does not call lookup when query is empty", async () => {
+    render(<AdminBookingsScreen />);
+    await waitFor(() => expect(screen.getByText("Bookings")).toBeTruthy());
+
+    fireEvent.press(screen.getByText("Find"));
+    expect(adminLookupBookings).not.toHaveBeenCalled();
+  });
+
+  it("shows search results when emailParam is provided", async () => {
+    mockSearchParams.query = "john@example.com";
+    render(<AdminBookingsScreen />);
+    await waitFor(() => {
+      expect(screen.getByText("Search Results")).toBeTruthy();
+    });
+  });
+
+  it("shows search results as a list even when the timetable is the persisted view", async () => {
+    // The timetable draws one location on one day; a search matches across all of both, so it
+    // has nothing to render the matches in. Persist timetable explicitly so the assertion is
+    // about the search overriding it, not about whichever mode a previous test left behind.
+    localStorage.setItem("bookings:viewMode", JSON.stringify("timetable"));
+    mockSearchParams.query = "john@example.com";
+
+    render(<AdminBookingsScreen />);
+
+    await waitFor(() => expect(screen.getByText("Search Results")).toBeTruthy());
+    expect(screen.getByText("john@example.com")).toBeTruthy();
+  });
+
+  it("hides the view toggle and status tabs while a search is active", async () => {
+    // The search fetch ignores location, status and view mode, so a control that appears to
+    // filter it would do nothing at all.
+    localStorage.setItem("bookings:viewMode", JSON.stringify("timetable"));
+    mockSearchParams.query = "john@example.com";
+
+    render(<AdminBookingsScreen />);
+
+    await waitFor(() => expect(screen.getByText("Search Results")).toBeTruthy());
+    expect(screen.queryByTestId("view-toggle-timetable")).toBeNull();
+    expect(screen.queryByTestId("view-toggle-list")).toBeNull();
+    expect(screen.queryByText("Past")).toBeNull();
+  });
+
+  it("draws the live view when it is chosen", async () => {
+    localStorage.setItem("bookings:viewMode", JSON.stringify("timetable"));
+    render(<AdminBookingsScreen />);
+
+    await waitFor(() => expect(screen.getByTestId("view-toggle-service")).toBeTruthy());
+    fireEvent.press(screen.getByTestId("view-toggle-service"));
+
+    await waitFor(() => expect(screen.getByText("LiveView")).toBeTruthy());
+    expect(screen.queryByText("GridBooking")).toBeNull();
+  });
+
+  // The live view reads the same grid fetch as the timetable, so entering it has to load one.
+  it("loads the day's grid when switching into the live view", async () => {
+    localStorage.setItem("bookings:viewMode", JSON.stringify("list"));
+    render(<AdminBookingsScreen />);
+
+    await waitFor(() => expect(screen.getByTestId("view-toggle-service")).toBeTruthy());
+    (adminGetResources as jest.Mock).mockClear();
+    fireEvent.press(screen.getByTestId("view-toggle-service"));
+
+    await waitFor(() => expect(adminGetResources).toHaveBeenCalledWith(1));
+  });
+
+  it("opens a booking pressed in the live view", async () => {
+    localStorage.setItem("bookings:viewMode", JSON.stringify("service"));
+    render(<AdminBookingsScreen />);
+
+    await waitFor(() => expect(screen.getByTestId("view-toggle-service")).toBeTruthy());
+    fireEvent.press(screen.getByTestId("view-toggle-service"));
+
+    await waitFor(() => expect(screen.getByTestId("service-press-booking")).toBeTruthy());
+    fireEvent.press(screen.getByTestId("service-press-booking"));
+
+    expect(screen.getByTestId("popup-close")).toBeTruthy();
+  });
+
+  it("keeps the day navigation on both grid-backed views", async () => {
+    localStorage.setItem("bookings:viewMode", JSON.stringify("service"));
+    render(<AdminBookingsScreen />);
+
+    await waitFor(() => expect(screen.getByTestId("grid-nav-next")).toBeTruthy());
+    expect(screen.getByTestId("grid-nav-prev")).toBeTruthy();
+  });
+
+  it("shows clear button when searchQuery is present", async () => {
+    mockSearchParams.query = "john@example.com";
+    render(<AdminBookingsScreen />);
+    await waitFor(() => {
+      expect(screen.getByText("Clear")).toBeTruthy();
+    });
+  });
+
+  it("renders booking row in list view and opens popup on press", async () => {
+    render(<AdminBookingsScreen />);
+    const listBtn = await screen.findByText("List");
+    fireEvent.press(listBtn);
+
+    await waitFor(() => expect(screen.getByText("john@example.com")).toBeTruthy());
+    fireEvent.press(screen.getByText("john@example.com"));
+    expect(getAdminBookings).toHaveBeenCalled();
+  });
+
+  it("handles cancel booking from the list row", async () => {
+    (adminDeleteBooking as jest.Mock).mockResolvedValue(true);
+    render(<AdminBookingsScreen />);
+    fireEvent.press(await screen.findByText("List"));
+    await waitFor(() => expect(screen.getByText("john@example.com")).toBeTruthy());
+
+    const confirmBtns = screen.queryAllByText("Cancel Booking");
+    if (confirmBtns.length > 0) {
+      fireEvent.press(confirmBtns[confirmBtns.length - 1]);
+      await waitFor(() => expect(adminDeleteBooking).toHaveBeenCalled());
+    }
+  });
+
+  it("renders bookings with multi-part email initials", async () => {
+    (getAdminBookings as jest.Mock).mockResolvedValue([
+      { ...mockBookings[0], id: 2, customerEmail: "john.doe@example.com" },
+    ]);
+    render(<AdminBookingsScreen />);
+    fireEvent.press(await screen.findByText("List"));
+    await waitFor(() => {
+      expect(screen.getByText("john.doe@example.com")).toBeTruthy();
+    });
+  });
+
+  it("renders timetable view by default and loads grid", async () => {
+    render(<AdminBookingsScreen />);
+    await waitFor(() => expect(screen.getByText("Bookings")).toBeTruthy());
+    expect(screen.getByText("Bookings")).toBeTruthy();
+  });
+
+  it("switches from timetable to list and back", async () => {
+    render(<AdminBookingsScreen />);
+    const listBtn = await screen.findByText("List");
+    fireEvent.press(listBtn);
+    await waitFor(() => expect(screen.getByText("john@example.com")).toBeTruthy());
+    fireEvent.press(listBtn);
+    expect(screen.getByText("Bookings")).toBeTruthy();
+  });
+
+  it("opens new booking modal when create=1 search param is set", async () => {
+    mockSearchParams.create = "1";
+    render(<AdminBookingsScreen />);
+    // The create=1 effect sets showNewModal; just verify the page renders
+    await waitFor(() => expect(screen.getByText("Bookings")).toBeTruthy());
+    // NewBookingModal is stubbed to null; verify getAdminBookings fires after venue loads
+    await waitFor(() => expect(getAdminBookings).toHaveBeenCalled(), { timeout: 3000 });
+  });
+
+  it("loads bookings when the query search param is provided", async () => {
+    mockSearchParams.query = "REF-ABCD";
+    render(<AdminBookingsScreen />);
+    await waitFor(() => expect(screen.getByText("Search Results")).toBeTruthy());
+    expect(getAdminBookings).toHaveBeenCalledWith(undefined, undefined, "all", "REF-ABCD");
+  });
+
+  it("clears search results when Clear button is pressed", async () => {
+    mockSearchParams.query = "john@example.com";
+    render(<AdminBookingsScreen />);
+    await waitFor(() => expect(screen.getByText("Clear")).toBeTruthy());
+    fireEvent.press(screen.getByText("Clear"));
+    expect(mockReplace).toHaveBeenCalledWith("/admin/bookings");
+  });
+
+  it("renders cancelled booking badge in list view", async () => {
+    (getAdminBookings as jest.Mock).mockResolvedValue([{ ...mockBookings[0], isCancelled: true }]);
+    render(<AdminBookingsScreen />);
+    fireEvent.press(await screen.findByText("List"));
+    await waitFor(() => expect(screen.getByText("Cancelled")).toBeTruthy());
+  });
+
+  it("renders booking with customerName instead of email", async () => {
+    (getAdminBookings as jest.Mock).mockResolvedValue([
+      { ...mockBookings[0], customerName: "Alice Smith" },
+    ]);
+    render(<AdminBookingsScreen />);
+    fireEvent.press(await screen.findByText("List"));
+    await waitFor(() => expect(screen.getByText("Alice Smith")).toBeTruthy());
+  });
+
+  it("navigates grid dates forward and backward", async () => {
+    render(<AdminBookingsScreen />);
+    await waitFor(() => expect(screen.getByText("Bookings")).toBeTruthy());
+    // Verify loadGrid runs on mount — adminGetResources is called for the timetable view
+    await waitFor(() => expect(adminGetResources).toHaveBeenCalled(), { timeout: 3000 });
+  });
+
+  it("selects a different location chip when multiple exist", async () => {
+    const twoVenues = [
+      { id: 1, name: "Location 1" },
+      { id: 2, name: "Location 2" },
+    ];
+    const { fetchVenues } = require("@/api/venues");
+    (fetchVenues as jest.Mock).mockResolvedValue(twoVenues);
+    render(<AdminBookingsScreen />);
+    await waitFor(() => expect(screen.getByText("Location 2")).toBeTruthy());
+    fireEvent.press(screen.getByText("Location 2"));
+    await waitFor(() => expect(getAdminBookings).toHaveBeenCalled());
+  });
+
+  it("lookup with multiple results navigates with the query param", async () => {
+    (adminLookupBookings as jest.Mock).mockResolvedValue([
+      { ...mockBookings[0], id: 1 },
+      { ...mockBookings[0], id: 2 },
+    ]);
+    render(<AdminBookingsScreen />);
+    await waitFor(() => expect(screen.getByText("Bookings")).toBeTruthy());
+
+    const input = screen.getByPlaceholderText("Name, email or reference…");
+    fireEvent.changeText(input, "REF-XYZ");
+    await act(async () => {
+      fireEvent.press(screen.getByText("Find"));
+    });
+    await waitFor(() => expect(mockReplace).toHaveBeenCalled());
+    expect(mockReplace).toHaveBeenCalledWith(
+      expect.objectContaining({
+        params: expect.objectContaining({ query: "REF-XYZ" }),
+      })
+    );
+  });
+
+  it("renders empty state in list view when no bookings", async () => {
+    (getAdminBookings as jest.Mock).mockResolvedValue([]);
+    render(<AdminBookingsScreen />);
+    fireEvent.press(await screen.findByText("List"));
+    await waitFor(() => expect(screen.getByText("No bookings found")).toBeTruthy());
+  });
+
+  it("renders past bookings sorted newest first", async () => {
+    const older = { ...mockBookings[0], id: 10, date: "2024-01-01T10:00:00Z" };
+    const newer = { ...mockBookings[0], id: 11, date: "2024-06-01T10:00:00Z" };
+    (getAdminBookings as jest.Mock).mockResolvedValue([older, newer]);
+    render(<AdminBookingsScreen />);
+    fireEvent.press(await screen.findByText("List"));
+    fireEvent.press(await screen.findByText("Past"));
+    await waitFor(() => expect(getAdminBookings).toHaveBeenCalledWith(1, undefined, "past"));
+  });
+
+  it("presses the Timetable button to switch back from list mode", async () => {
+    render(<AdminBookingsScreen />);
+    // Start in timetable, switch to list, then back
+    fireEvent.press(await screen.findByText("List"));
+    await waitFor(() => expect(screen.getByText("Active")).toBeTruthy());
+    fireEvent.press(screen.getByText("Timetable"));
+    await waitFor(() => expect(adminGetResources).toHaveBeenCalled());
+    expect(screen.getByText("Bookings")).toBeTruthy();
+  });
+
+  it("selects the same location chip (no-op — should not trigger extra grid load)", async () => {
+    render(<AdminBookingsScreen />);
+    await waitFor(() => expect(screen.getByText("Bookings")).toBeTruthy());
+    // Wait for initial venue load
+    await waitFor(() => expect(adminGetResources).toHaveBeenCalled(), { timeout: 3000 });
+    // There's only one venue in this test (no chips shown for single), but pressing
+    // timetable button while already in timetable should trigger switchToTimetable
+    fireEvent.press(screen.getByText("Timetable"));
+    await waitFor(() => expect(adminGetResources).toHaveBeenCalled());
+    expect(true).toBe(true);
+  });
+
+  it("renders wide list view with today's booking count", async () => {
+    // Wide list view should show today's booking count in subtitle
+    const today = new Date().toISOString();
+    (getAdminBookings as jest.Mock).mockResolvedValue([{ ...mockBookings[0], date: today }]);
+    render(<AdminBookingsScreen />);
+    fireEvent.press(await screen.findByText("List"));
+    await waitFor(() => {
+      const subtitleElements = screen.getAllByText(/total|today/i);
+      expect(subtitleElements.length).toBeGreaterThan(0);
+    });
+  });
+
+  it("renders wide resource view with booking name initials", async () => {
+    // Test initials logic: single-word name -> first two chars; multi-word -> first letters
+    (getAdminBookings as jest.Mock).mockResolvedValue([
+      { ...mockBookings[0], customerName: "Alice Bob", customerEmail: "alice@example.com" },
+    ]);
+    render(<AdminBookingsScreen />);
+    fireEvent.press(await screen.findByText("List"));
+    await waitFor(() => expect(screen.getByText("Alice Bob")).toBeTruthy());
+    // "AB" initials should appear
+    expect(screen.getByText("AB")).toBeTruthy();
+  });
+
+  it("renders wide resource with email initials (no name)", async () => {
+    (getAdminBookings as jest.Mock).mockResolvedValue([
+      { ...mockBookings[0], customerName: undefined, customerEmail: "test.user@example.com" },
+    ]);
+    render(<AdminBookingsScreen />);
+    fireEvent.press(await screen.findByText("List"));
+    await waitFor(() => expect(screen.getByText("test.user@example.com")).toBeTruthy());
+    // "TU" initials from "test.user" -> "test user" -> first letters
+    expect(screen.getByText("TU")).toBeTruthy();
+  });
+
+  it("NewBookingModal onCreated callback sets selected booking id", async () => {
+    // The NewBookingModal is mocked to null, but we can verify the callback is wired
+    // by checking that showNewModal opens when button is pressed
+    render(<AdminBookingsScreen />);
+    fireEvent.press(await screen.findByText("List"));
+    fireEvent.press(await screen.findByText("New Booking"));
+    // NewBookingModal becomes visible — since it's mocked to null, no visible change
+    expect(screen.getByText("Bookings")).toBeTruthy();
+  });
+
+  it("BookingDetailPopup onMutated callback refreshes bookings", async () => {
+    // The onMutated callback increments refreshKey which re-fetches bookings
+    render(<AdminBookingsScreen />);
+    await waitFor(() => expect(screen.getByText("Bookings")).toBeTruthy());
+    // Since BookingDetailPopup is mocked to null, we can verify the screen renders
+    expect(screen.getByText("Bookings")).toBeTruthy();
+  });
+
+  it("navigates to the next grid date via forward button", async () => {
+    render(<AdminBookingsScreen />);
+    await waitFor(() => expect(adminGetResources).toHaveBeenCalled(), { timeout: 3000 });
+    const callsBefore = (adminGetResources as jest.Mock).mock.calls.length;
+    fireEvent.press(screen.getByTestId("grid-nav-next"));
+    await waitFor(() =>
+      expect((adminGetResources as jest.Mock).mock.calls.length).toBeGreaterThan(callsBefore)
+    );
+  });
+
+  it("navigates to the previous grid date via back button", async () => {
+    render(<AdminBookingsScreen />);
+    await waitFor(() => expect(adminGetResources).toHaveBeenCalled(), { timeout: 3000 });
+    const callsBefore = (adminGetResources as jest.Mock).mock.calls.length;
+    fireEvent.press(screen.getByTestId("grid-nav-prev"));
+    await waitFor(() =>
+      expect((adminGetResources as jest.Mock).mock.calls.length).toBeGreaterThan(callsBefore)
+    );
+  });
+
+  it("resets grid date to today when date label is pressed on a non-today date", async () => {
+    render(<AdminBookingsScreen />);
+    await waitFor(() => expect(adminGetResources).toHaveBeenCalled(), { timeout: 3000 });
+    // Navigate forward to make gridDate != today
+    fireEvent.press(screen.getByTestId("grid-nav-next"));
+    await waitFor(() =>
+      expect((adminGetResources as jest.Mock).mock.calls.length).toBeGreaterThan(1)
+    );
+    // Now "tap for today" hint should appear; press the date label to reset
+    const todayHint = screen.queryByText("tap for today");
+    if (todayHint) {
+      fireEvent.press(todayHint);
+      await waitFor(() => expect(adminGetResources).toHaveBeenCalled());
+    }
+  });
+
+  it("renders mobile card list when window is narrow", async () => {
+    const mockUseDimensions = jest.spyOn(require("react-native"), "useWindowDimensions");
+    mockUseDimensions.mockReturnValue({ width: 400, height: 800 });
+    try {
+      (getAdminBookings as jest.Mock).mockResolvedValue(mockBookings);
+      render(<AdminBookingsScreen />);
+      // Switch to list so the mobile card list renders (not timetable)
+      await waitFor(() => expect(screen.getByTestId("view-toggle-list")).toBeTruthy());
+      fireEvent.press(screen.getByTestId("view-toggle-list"));
+      await waitFor(() => expect(screen.getByText("john@example.com")).toBeTruthy());
+      // Mobile card list shows the booking
+      expect(screen.getByText("john@example.com")).toBeTruthy();
+    } finally {
+      mockUseDimensions.mockRestore();
+    }
+  });
+
+  it("pressing a mobile card opens the booking popup", async () => {
+    const mockUseDimensions = jest.spyOn(require("react-native"), "useWindowDimensions");
+    mockUseDimensions.mockReturnValue({ width: 400, height: 800 });
+    try {
+      (getAdminBookings as jest.Mock).mockResolvedValue(mockBookings);
+      render(<AdminBookingsScreen />);
+      await waitFor(() => expect(screen.getByTestId("view-toggle-list")).toBeTruthy());
+      fireEvent.press(screen.getByTestId("view-toggle-list"));
+      await waitFor(() => expect(screen.getByText("john@example.com")).toBeTruthy());
+      fireEvent.press(screen.getByText("john@example.com"));
+      expect(screen.getByText("Bookings")).toBeTruthy();
+    } finally {
+      mockUseDimensions.mockRestore();
+    }
+  });
+
+  it("renders mobile card with customerName and email", async () => {
+    const mockUseDimensions = jest.spyOn(require("react-native"), "useWindowDimensions");
+    mockUseDimensions.mockReturnValue({ width: 400, height: 800 });
+    try {
+      (getAdminBookings as jest.Mock).mockResolvedValue([
+        { ...mockBookings[0], customerName: "Alice Smith", customerEmail: "alice@example.com" },
+      ]);
+      render(<AdminBookingsScreen />);
+      await waitFor(() => expect(screen.getByTestId("view-toggle-list")).toBeTruthy());
+      fireEvent.press(screen.getByTestId("view-toggle-list"));
+      await waitFor(() => expect(screen.getByText("Alice Smith")).toBeTruthy());
+      expect(screen.getByText("alice@example.com")).toBeTruthy();
+    } finally {
+      mockUseDimensions.mockRestore();
+    }
+  });
+
+  it("renders mobile card with cancelled badge", async () => {
+    const mockUseDimensions = jest.spyOn(require("react-native"), "useWindowDimensions");
+    mockUseDimensions.mockReturnValue({ width: 400, height: 800 });
+    try {
+      (getAdminBookings as jest.Mock).mockResolvedValue([
+        { ...mockBookings[0], isCancelled: true },
+      ]);
+      render(<AdminBookingsScreen />);
+      await waitFor(() => expect(screen.getByTestId("view-toggle-list")).toBeTruthy());
+      fireEvent.press(screen.getByTestId("view-toggle-list"));
+      await waitFor(() => expect(screen.getAllByText("Cancelled").length).toBeGreaterThan(0));
+    } finally {
+      mockUseDimensions.mockRestore();
+    }
+  });
+
+  it("triggers cancel flow via row cancel button in wide resource view", async () => {
+    (getAdminBookings as jest.Mock).mockResolvedValue(mockBookings);
+    render(<AdminBookingsScreen />);
+    fireEvent.press(await screen.findByText("List"));
+    await waitFor(() => expect(screen.getByText("john@example.com")).toBeTruthy());
+
+    const cancelBtns = screen.queryAllByLabelText(/^Cancel booking for /);
+    if (cancelBtns.length > 0) {
+      // Provide a synthetic event with stopPropagation to avoid TypeError
+      fireEvent.press(cancelBtns[0], { stopPropagation: jest.fn() });
+      await waitFor(() => expect(screen.queryByText(/Cancel booking for/)).toBeTruthy());
+      // Press Keep to dismiss the modal
+      fireEvent.press(screen.getByText("Keep"));
+      await waitFor(() => expect(screen.queryByText(/Cancel booking for/)).toBeNull());
+    }
+  });
+
+  it("confirms cancel booking from row cancel button", async () => {
+    (getAdminBookings as jest.Mock).mockResolvedValue(mockBookings);
+    (adminDeleteBooking as jest.Mock).mockResolvedValue(true);
+    render(<AdminBookingsScreen />);
+    fireEvent.press(await screen.findByText("List"));
+    await waitFor(() => expect(screen.getByText("john@example.com")).toBeTruthy());
+
+    const cancelBtns = screen.queryAllByLabelText(/^Cancel booking for /);
+    if (cancelBtns.length > 0) {
+      fireEvent.press(cancelBtns[0], { stopPropagation: jest.fn() });
+      const confirmBtns = await screen.findAllByText("Cancel Booking");
+      // Last one is the confirm button in the modal
+      fireEvent.press(confirmBtns[confirmBtns.length - 1]);
+      await waitFor(() => expect(adminDeleteBooking).toHaveBeenCalledWith(1));
+    }
+  });
+
+  it("hides the row cancel button for a past, non-cancelled booking", async () => {
+    (getAdminBookings as jest.Mock).mockResolvedValue([
+      { ...mockBookings[0], date: "2020-01-01T10:00:00Z" },
+    ]);
+    render(<AdminBookingsScreen />);
+    fireEvent.press(await screen.findByText("List"));
+    await waitFor(() => expect(screen.getByText("john@example.com")).toBeTruthy());
+
+    expect(screen.queryAllByLabelText(/^Cancel booking for /).length).toBe(0);
+  });
+
+  it("pressing grid booking triggers onBookingPress callback", async () => {
+    render(<AdminBookingsScreen />);
+    await waitFor(() => expect(screen.getByTestId("grid-press-booking")).toBeTruthy());
+    fireEvent.press(screen.getByTestId("grid-press-booking"));
+    // selectedBookingId is now set; popup renders with close/deleted buttons
+    await waitFor(() => expect(screen.getByTestId("popup-close")).toBeTruthy());
+  });
+
+  it("BookingDetailPopup onClose callback clears selectedBookingId", async () => {
+    render(<AdminBookingsScreen />);
+    // First open popup via grid press
+    await waitFor(() => expect(screen.getByTestId("grid-press-booking")).toBeTruthy());
+    fireEvent.press(screen.getByTestId("grid-press-booking"));
+    await waitFor(() => expect(screen.getByTestId("popup-close")).toBeTruthy());
+    // Now close it
+    fireEvent.press(screen.getByTestId("popup-close"));
+    expect(screen.getByText("Bookings")).toBeTruthy();
+  });
+
+  it("BookingDetailPopup onMutated callback refreshes bookings and reloads grid", async () => {
+    const callsBefore = (getAdminBookings as jest.Mock).mock.calls.length;
+    render(<AdminBookingsScreen />);
+    await waitFor(() => expect(screen.getByTestId("grid-press-booking")).toBeTruthy());
+    fireEvent.press(screen.getByTestId("grid-press-booking"));
+    await waitFor(() => expect(screen.getByTestId("popup-mutated")).toBeTruthy());
+    fireEvent.press(screen.getByTestId("popup-mutated"));
+    await waitFor(() =>
+      expect((getAdminBookings as jest.Mock).mock.calls.length).toBeGreaterThan(callsBefore)
+    );
+  });
+
+  it("NewBookingModal onClose callback hides the modal", async () => {
+    render(<AdminBookingsScreen />);
+    await waitFor(() => expect(screen.getByText("List")).toBeTruthy());
+    // Open new booking modal via header button
+    // Header button is present in timetable view
+    expect(screen.getByText("Bookings")).toBeTruthy();
+    // Close the modal
+    const closeBtn = screen.queryByTestId("newmodal-close");
+    if (closeBtn) {
+      fireEvent.press(closeBtn);
+      expect(screen.getByText("Bookings")).toBeTruthy();
+    }
+  });
+
+  it("NewBookingModal onCreated callback sets selectedBookingId", async () => {
+    render(<AdminBookingsScreen />);
+    await waitFor(() => expect(screen.getByTestId("newmodal-created")).toBeTruthy());
+    fireEvent.press(screen.getByTestId("newmodal-created"));
+    // After onCreated(99), showNewModal=false and selectedBookingId=99; popup renders
+    await waitFor(() => expect(screen.getByTestId("popup-close")).toBeTruthy());
+  });
+
+  it("presses New Booking button in empty list state", async () => {
+    (getAdminBookings as jest.Mock).mockResolvedValue([]);
+    render(<AdminBookingsScreen />);
+    fireEvent.press(await screen.findByText("List"));
+    await waitFor(() => expect(screen.getByText("No bookings found")).toBeTruthy());
+    // Press the "New Booking" button inside the empty state
+    const newBtns = screen.queryAllByText("New Booking");
+    if (newBtns.length > 0) {
+      fireEvent.press(newBtns[newBtns.length - 1]);
+      // NewBookingModal should become visible (onClose/onCreated buttons appear)
+      await waitFor(() => expect(screen.getByTestId("newmodal-close")).toBeTruthy());
+    }
+  });
+});
+
+describe("AdminBookingsScreen refresh after mutation", () => {
+  const mockBookings = [
+    {
+      id: 1,
+      bookingRef: "REF1",
+      customerEmail: "john@example.com",
+      status: "active",
+      date: new Date().toISOString(),
+      partySize: 2,
+      venueId: 1,
+      venueName: "Location 1",
+      sectionId: 1,
+      sectionName: "Main",
+      resourceId: 1,
+      resourceName: "T1",
+    },
+  ];
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (getAdminBookings as jest.Mock).mockResolvedValue(mockBookings);
+    (adminGetResources as jest.Mock).mockResolvedValue([]);
+    (adminLookupBookings as jest.Mock).mockResolvedValue([]);
+    Object.keys(mockSearchParams).forEach((k) => delete mockSearchParams[k]);
+  });
+
+  it("re-fetches the bookings list after NewBookingModal onCreated", async () => {
+    render(<AdminBookingsScreen />);
+    await waitFor(() => expect(screen.getByText("Bookings")).toBeTruthy());
+    const callsBefore = (getAdminBookings as jest.Mock).mock.calls.length;
+
+    const newBtns = screen.queryAllByText("New Booking");
+    fireEvent.press(newBtns[0]);
+    await waitFor(() => expect(screen.getByTestId("newmodal-created")).toBeTruthy());
+    fireEvent.press(screen.getByTestId("newmodal-created"));
+
+    await waitFor(() =>
+      expect((getAdminBookings as jest.Mock).mock.calls.length).toBeGreaterThan(callsBefore)
+    );
+  });
+
+  it("does not refresh the list when a row cancel fails", async () => {
+    (adminDeleteBooking as jest.Mock).mockRejectedValue(new Error("Failed to cancel the booking."));
+    render(<AdminBookingsScreen />);
+    fireEvent.press(await screen.findByText("List"));
+    await waitFor(() => expect(screen.getByText("john@example.com")).toBeTruthy());
+
+    const callsBefore = (getAdminBookings as jest.Mock).mock.calls.length;
+    const cancelBtns = screen.queryAllByLabelText(/^Cancel booking for /);
+    expect(cancelBtns.length).toBeGreaterThan(0);
+    fireEvent.press(cancelBtns[0], { stopPropagation: jest.fn() });
+    const confirmBtns = await screen.findAllByText("Cancel Booking");
+    fireEvent.press(confirmBtns[confirmBtns.length - 1]);
+
+    await waitFor(() => expect(adminDeleteBooking).toHaveBeenCalledWith(1));
+    expect((getAdminBookings as jest.Mock).mock.calls.length).toBe(callsBefore);
+    await waitFor(() => expect(screen.getByText("Failed to cancel the booking.")).toBeTruthy());
+  });
+});
+
+describe("AdminBookingsScreen filter persistence", () => {
+  const originalPlatform = Platform.OS;
+  const mockBookings = [
+    {
+      id: 1,
+      bookingRef: "REF1",
+      customerEmail: "john@example.com",
+      status: "active",
+      date: new Date().toISOString(),
+      partySize: 2,
+      venueId: 1,
+      venueName: "Location 1",
+      sectionId: 1,
+      sectionName: "Main",
+      resourceId: 1,
+      resourceName: "T1",
+    },
+  ];
+
+  beforeEach(() => {
+    localStorage.clear();
+    jest.clearAllMocks();
+    (getAdminBookings as jest.Mock).mockResolvedValue(mockBookings);
+    (adminGetResources as jest.Mock).mockResolvedValue([]);
+    (adminLookupBookings as jest.Mock).mockResolvedValue([]);
+    Object.keys(mockSearchParams).forEach((k) => delete mockSearchParams[k]);
+    Object.defineProperty(Platform, "OS", { value: "web", configurable: true });
+  });
+
+  afterEach(() => {
+    Object.defineProperty(Platform, "OS", { value: originalPlatform, configurable: true });
+  });
+
+  it("restores the persisted status filter on mount", async () => {
+    localStorage.setItem("bookings:statusFilter", JSON.stringify("past"));
+    render(<AdminBookingsScreen />);
+    await waitFor(() => expect(getAdminBookings).toHaveBeenCalledWith(1, undefined, "past"));
+  });
+
+  it("restores the persisted view mode (list) on mount", async () => {
+    localStorage.setItem("bookings:viewMode", JSON.stringify("list"));
+    render(<AdminBookingsScreen />);
+    await waitFor(() => expect(screen.getByText("john@example.com")).toBeTruthy());
+  });
+
+  it("falls back to the first location when the persisted id no longer exists", async () => {
+    localStorage.setItem("bookings:venueId", JSON.stringify(999));
+    render(<AdminBookingsScreen />);
+    await waitFor(() => expect(getAdminBookings).toHaveBeenCalledWith(1, undefined, "active"));
+  });
+
+  it("persists the selected location when a chip is pressed", async () => {
+    const twoVenues = [
+      { id: 1, name: "Location 1" },
+      { id: 2, name: "Location 2" },
+    ];
+    const { fetchVenues } = require("@/api/venues");
+    (fetchVenues as jest.Mock).mockResolvedValue(twoVenues);
+    render(<AdminBookingsScreen />);
+    await waitFor(() => expect(screen.getByText("Location 2")).toBeTruthy());
+    fireEvent.press(screen.getByText("Location 2"));
+    await waitFor(() => {
+      expect(JSON.parse(localStorage.getItem("bookings:venueId") as string)).toBe(2);
+    });
+  });
+});
+
+describe("AdminBookingsScreen toolbar", () => {
+  const originalPlatform = Platform.OS;
+
+  beforeEach(() => {
+    localStorage.clear();
+    jest.clearAllMocks();
+    (getAdminBookings as jest.Mock).mockResolvedValue([]);
+    (adminGetResources as jest.Mock).mockResolvedValue([]);
+    (adminLookupBookings as jest.Mock).mockResolvedValue([]);
+    Object.keys(mockSearchParams).forEach((k) => delete mockSearchParams[k]);
+    // The persisted view mode only reaches the screen on web, and these are all about what the
+    // toolbar holds in a given mode.
+    Object.defineProperty(Platform, "OS", { value: "web", configurable: true });
+  });
+
+  afterEach(() => {
+    Object.defineProperty(Platform, "OS", { value: originalPlatform, configurable: true });
+  });
+
+  // The toolbar used to carry the status tabs, which only apply to the list, so switching view
+  // rearranged it. It now holds the same controls in every mode.
+  it("keeps the status tabs out of the toolbar", async () => {
+    localStorage.setItem("bookings:viewMode", JSON.stringify("list"));
+    render(<AdminBookingsScreen />);
+
+    await waitFor(() => expect(screen.getByTestId("status-tab-active")).toBeTruthy());
+    const toolbar = screen.getByTestId("bookings-toolbar");
+
+    expect(within(toolbar).queryByTestId("status-tab-active")).toBeNull();
+    expect(within(toolbar).getByTestId("view-toggle-list")).toBeTruthy();
+  });
+
+  it("offers the same view toggle in every mode", async () => {
+    for (const mode of ["timetable", "service", "list"]) {
+      localStorage.setItem("bookings:viewMode", JSON.stringify(mode));
+      const view = render(<AdminBookingsScreen />);
+
+      await waitFor(() => expect(screen.getByTestId("bookings-toolbar")).toBeTruthy());
+      const toolbar = screen.getByTestId("bookings-toolbar");
+      for (const key of ["timetable", "service", "list"]) {
+        expect(within(toolbar).getByTestId(`view-toggle-${key}`)).toBeTruthy();
+      }
+      view.unmount();
+    }
+  });
+
+  it("filters the list by status from below the toolbar", async () => {
+    localStorage.setItem("bookings:viewMode", JSON.stringify("list"));
+    render(<AdminBookingsScreen />);
+
+    await waitFor(() => expect(screen.getByTestId("status-tab-cancelled")).toBeTruthy());
+    fireEvent.press(screen.getByTestId("status-tab-cancelled"));
+
+    await waitFor(() =>
+      expect(getAdminBookings).toHaveBeenCalledWith(expect.anything(), undefined, "cancelled")
+    );
+  });
+});

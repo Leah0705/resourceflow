@@ -1,0 +1,324 @@
+import React, { useState, useMemo, useRef, useEffect } from "react";
+import {
+  View,
+  Pressable,
+  ScrollView,
+  NativeSyntheticEvent,
+  NativeScrollEvent,
+  Platform,
+} from "react-native";
+import { useTranslation } from "react-i18next";
+import { ThemedText } from "../themed-text";
+import { TimeSlotDto } from "@/api/availability";
+import { useAppTheme } from "@/hooks/use-app-theme";
+import { IconButton } from "@/components/common/IconButton";
+import { getNowInTimezone } from "@/utils/date";
+import { haptics } from "@/utils/haptics";
+import { styles } from "./PopularTimesPicker.styles";
+
+interface PopularTimesPickerProps {
+  slots: TimeSlotDto[];
+  selectedTime: string;
+  onSelectTime: (time: string) => void;
+  selectedDate?: string;
+  timezone?: string;
+  /**
+   * Wrap the chips onto multiple rows instead of scrolling them horizontally. The
+   * booking drawer is only 460px wide, where the scroller's overlay arrow lands on
+   * top of the last chip and hides half the times behind a swipe.
+   */
+  wrap?: boolean;
+}
+
+type Category = "AM" | "PM" | "All";
+
+export default function PopularTimesPicker({
+  slots,
+  selectedTime,
+  onSelectTime,
+  selectedDate,
+  timezone,
+  wrap = false,
+}: PopularTimesPickerProps) {
+  const { colors, primaryColor: PRIMARY } = useAppTheme();
+  const { t } = useTranslation();
+  const [activeCategory, setActiveCategory] = useState<Category>("All");
+
+  const categoryLabel = (cat: Category): string => (cat === "All" ? t("venue.filterBar.all") : cat);
+
+  const scrollRef = useRef<ScrollView>(null);
+  const [scrollPos, setScrollPos] = useState(0);
+  const [contentWidth, setContentWidth] = useState(0);
+  const [containerWidth, setContainerWidth] = useState(0);
+
+  const categories: Category[] = ["All", "AM", "PM"];
+
+  const slotsInView = useMemo(() => {
+    if (!slots?.length || !selectedDate || !timezone) return slots ?? [];
+    const { dateStr: todayStr, hours, minutes } = getNowInTimezone(timezone);
+    if (selectedDate !== todayStr) return slots;
+    const nowMins = hours * 60 + minutes;
+    return slots.filter((s) => {
+      const [h, m] = s.time.split(":").map(Number);
+      return h * 60 + m >= nowMins - 5;
+    });
+  }, [slots, selectedDate, timezone]);
+
+  const filteredSlots = useMemo(() => {
+    const available = slotsInView.filter((s) => s.isAvailable);
+    if (activeCategory === "All") return available;
+    return available.filter((s) => s.category === activeCategory);
+  }, [slotsInView, activeCategory]);
+
+  const isCategoryDisabled = (cat: Category): boolean => {
+    if (cat === "All") return false;
+    if (!selectedDate || !timezone) return false;
+    const { dateStr: todayStr } = getNowInTimezone(timezone);
+    if (selectedDate !== todayStr) return false;
+    return !slotsInView.some((s) => s.category === cat);
+  };
+
+  useEffect(() => {
+    const hasAvailableInCategory = slotsInView.some(
+      (s) => s.isAvailable && s.category === activeCategory
+    );
+    if (
+      !hasAvailableInCategory &&
+      activeCategory !== "All" &&
+      slotsInView.some((s) => s.isAvailable)
+    ) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setActiveCategory("All");
+    }
+  }, [slotsInView, activeCategory]);
+
+  /* istanbul ignore next */
+  useEffect(() => {
+    if (Platform.OS !== "web") return;
+
+    const node = scrollRef.current?.getScrollableNode?.() as HTMLElement | undefined;
+    if (!node) return;
+
+    const handleWheel = (e: WheelEvent) => {
+      if (Math.abs(e.deltaX) < Math.abs(e.deltaY)) {
+        node.scrollLeft += e.deltaY;
+        e.preventDefault();
+        setScrollPos(node.scrollLeft);
+      }
+    };
+
+    let isDown = false;
+    let startX: number;
+    let scrollLeft: number;
+
+    const onMouseDown = (e: MouseEvent) => {
+      isDown = true;
+      startX = e.pageX - node.offsetLeft;
+      scrollLeft = node.scrollLeft;
+      node.classList.add("grabbing");
+    };
+    const onMouseLeave = () => {
+      isDown = false;
+      node.classList.remove("grabbing");
+    };
+    const onMouseUp = () => {
+      isDown = false;
+      node.classList.remove("grabbing");
+    };
+    const onMouseMove = (e: MouseEvent) => {
+      if (!isDown) return;
+      e.preventDefault();
+      const x = e.pageX - node.offsetLeft;
+      const walk = (x - startX) * 2;
+      node.scrollLeft = scrollLeft - walk;
+      setScrollPos(node.scrollLeft);
+    };
+
+    node.classList.add("grab-scroll");
+    node.addEventListener("wheel", handleWheel, { passive: false });
+    node.addEventListener("mousedown", onMouseDown);
+    node.addEventListener("mouseleave", onMouseLeave);
+    node.addEventListener("mouseup", onMouseUp);
+    node.addEventListener("mousemove", onMouseMove);
+
+    return () => {
+      node.removeEventListener("wheel", handleWheel);
+      node.removeEventListener("mousedown", onMouseDown);
+      node.removeEventListener("mouseleave", onMouseLeave);
+      node.removeEventListener("mouseup", onMouseUp);
+      node.removeEventListener("mousemove", onMouseMove);
+      node.classList.remove("grab-scroll", "grabbing");
+    };
+  }, [activeCategory]);
+
+  const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    setScrollPos(event.nativeEvent.contentOffset.x);
+  };
+
+  const scrollBy = (offset: number) => {
+    scrollRef.current?.scrollTo({ x: scrollPos + offset, animated: true });
+  };
+
+  const showLeftArrow = !wrap && scrollPos > 15;
+  const showRightArrow =
+    !wrap && contentWidth > containerWidth && scrollPos < contentWidth - containerWidth - 15;
+
+  const categoryTabs = categories.map((cat) => {
+    const isActive = activeCategory === cat;
+    const disabled = isCategoryDisabled(cat);
+    return (
+      <Pressable
+        key={cat}
+        onPress={() => {
+          if (!disabled) {
+            haptics.selection();
+            setActiveCategory(cat);
+          }
+        }}
+        disabled={disabled}
+        hitSlop={{ top: 6, bottom: 6, left: 0, right: 0 }}
+        accessibilityRole="tab"
+        accessibilityLabel={categoryLabel(cat)}
+        accessibilityState={{ selected: isActive, disabled }}
+        style={[
+          styles.tab,
+          { borderColor: colors.border },
+          isActive && { backgroundColor: PRIMARY, borderColor: PRIMARY },
+          disabled && styles.tabDisabled,
+        ]}
+      >
+        <ThemedText
+          style={[
+            styles.tabText,
+            isActive && { color: "#fff" },
+            disabled && styles.tabTextDisabled,
+          ]}
+        >
+          {categoryLabel(cat)}
+        </ThemedText>
+      </Pressable>
+    );
+  });
+
+  const slotChips =
+    filteredSlots.length === 0 ? (
+      <ThemedText style={styles.emptyText} role="status" accessibilityLiveRegion="polite">
+        {t("booking.popularTimes.empty")}
+      </ThemedText>
+    ) : (
+      filteredSlots.map((slot) => {
+        const isSelected = selectedTime === slot.time;
+        return (
+          <Pressable
+            key={slot.time}
+            onPress={() => {
+              haptics.selection();
+              onSelectTime(slot.time);
+            }}
+            accessibilityRole="radio"
+            accessibilityLabel={slot.time}
+            accessibilityState={{ checked: isSelected, selected: isSelected }}
+            style={[
+              styles.slotChip,
+              { borderColor: colors.border, backgroundColor: colors.input },
+              isSelected && {
+                backgroundColor: PRIMARY,
+                borderColor: PRIMARY,
+              },
+            ]}
+          >
+            <ThemedText style={[styles.slotText, isSelected && { color: "#fff" }]}>
+              {slot.time}
+            </ThemedText>
+          </Pressable>
+        );
+      })
+    );
+
+  if (wrap) {
+    return (
+      <View style={styles.container}>
+        <View style={styles.tabs} accessibilityRole="tablist">
+          {categoryTabs}
+        </View>
+        <View
+          style={styles.wrappedSlots}
+          role="radiogroup"
+          accessibilityLabel={t("booking.popularTimes.availableTimesA11y")}
+        >
+          {slotChips}
+        </View>
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.container}>
+      <View style={styles.tabs} accessibilityRole="tablist">
+        {categoryTabs}
+      </View>
+
+      <View
+        role="radiogroup"
+        accessibilityLabel={t("booking.popularTimes.availableTimesA11y")}
+        style={styles.scrollWrapper}
+        onLayout={(e) => setContainerWidth(e.nativeEvent.layout.width)}
+      >
+        <ScrollView
+          ref={scrollRef}
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.slotsScroll}
+          contentContainerStyle={styles.slotsContainer}
+          onScroll={handleScroll}
+          scrollEventThrottle={16}
+          onContentSizeChange={(w) => setContentWidth(w)}
+        >
+          {slotChips}
+        </ScrollView>
+
+        {showLeftArrow && (
+          <View
+            pointerEvents="box-none"
+            style={[
+              styles.scrollIndicator,
+              styles.leftIndicator,
+              { backgroundColor: colors.page + "99" },
+            ]}
+          >
+            <IconButton
+              testID="scroll-left-arrow"
+              name="chevron-back"
+              accessibilityLabel={t("booking.popularTimes.earlierA11y")}
+              onPress={() => scrollBy(-180)}
+              color={PRIMARY}
+              size="md"
+              style={[styles.arrowCircle, { backgroundColor: colors.card, borderColor: PRIMARY }]}
+            />
+          </View>
+        )}
+
+        {showRightArrow && (
+          <View
+            pointerEvents="box-none"
+            style={[
+              styles.scrollIndicator,
+              styles.rightIndicator,
+              { backgroundColor: colors.page + "99" },
+            ]}
+          >
+            <IconButton
+              testID="scroll-right-arrow"
+              name="chevron-forward"
+              accessibilityLabel={t("booking.popularTimes.laterA11y")}
+              onPress={() => scrollBy(180)}
+              color={PRIMARY}
+              size="md"
+              style={[styles.arrowCircle, { backgroundColor: colors.card, borderColor: PRIMARY }]}
+            />
+          </View>
+        )}
+      </View>
+    </View>
+  );
+}

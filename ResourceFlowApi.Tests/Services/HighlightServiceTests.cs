@@ -1,0 +1,424 @@
+using Microsoft.EntityFrameworkCore;
+using ResourceFlowApi.Core.Application.DTOs;
+using ResourceFlowApi.Core.Application.Exceptions;
+using ResourceFlowApi.Core.Application.Services;
+using ResourceFlowApi.Core.Domain;
+using ResourceFlowApi.Infrastructure.Persistence;
+using ResourceFlowApi.Infrastructure.Persistence.Repositories;
+
+namespace ResourceFlowApi.Tests.Services;
+
+public class HighlightServiceTests
+{
+    [Fact]
+    public async Task GetAllAsync_ReturnsEmpty_WhenNoHighlights()
+    {
+        using AppDbContext db = TestDbFactory.Create(nameof(GetAllAsync_ReturnsEmpty_WhenNoHighlights));
+        var svc = new HighlightService(new HighlightRepository(db));
+
+        List<HighlightDto> result = await svc.GetAllAsync();
+
+        Assert.Empty(result);
+    }
+
+    [Fact]
+    public async Task GetAllAsync_ReturnsSortedBySortOrderThenId()
+    {
+        using AppDbContext db = TestDbFactory.Create(nameof(GetAllAsync_ReturnsSortedBySortOrderThenId));
+        db.Highlights.AddRange(
+            new VenueHighlight { Title = "C", Body = "b", SortOrder = 2 },
+            new VenueHighlight { Title = "A", Body = "b", SortOrder = 1 },
+            new VenueHighlight { Title = "B", Body = "b", SortOrder = 1 }
+        );
+        await db.SaveChangesAsync();
+
+        var svc = new HighlightService(new HighlightRepository(db));
+        List<HighlightDto> result = await svc.GetAllAsync();
+
+        Assert.Equal(3, result.Count);
+        Assert.Equal("A", result[0].Title);
+        Assert.Equal("B", result[1].Title);
+        Assert.Equal("C", result[2].Title);
+    }
+
+    [Fact]
+    public async Task GetAllAsync_MapsAllFields()
+    {
+        using AppDbContext db = TestDbFactory.Create(nameof(GetAllAsync_MapsAllFields));
+        db.Highlights.Add(new VenueHighlight { Title = "T", Body = "B", IconKey = "flame", SortOrder = 3 });
+        await db.SaveChangesAsync();
+
+        var svc = new HighlightService(new HighlightRepository(db));
+        List<HighlightDto> result = await svc.GetAllAsync();
+
+        HighlightDto dto = Assert.Single(result);
+        Assert.Equal("T", dto.Title);
+        Assert.Equal("B", dto.Body);
+        Assert.Equal("flame", dto.IconKey);
+        Assert.Equal(3, dto.SortOrder);
+        Assert.NotEqual(0, dto.Id);
+    }
+
+    [Fact]
+    public async Task CreateAsync_PersistsAndReturnsDto()
+    {
+        using AppDbContext db = TestDbFactory.Create(nameof(CreateAsync_PersistsAndReturnsDto));
+        var svc = new HighlightService(new HighlightRepository(db));
+        var req = new CreateHighlightRequest { Title = "Test", Body = "body", IconKey = "star", SortOrder = 0 };
+
+        HighlightDto result = await svc.CreateAsync(req);
+
+        Assert.NotEqual(0, result.Id);
+        Assert.Equal("Test", result.Title);
+        Assert.Equal("body", result.Body);
+        Assert.Equal("star", result.IconKey);
+        Assert.Equal(1, await db.Highlights.CountAsync());
+    }
+
+    [Fact]
+    public async Task CreateAsync_PersistsLink_Trimmed_AndReturnsDto()
+    {
+        using AppDbContext db = TestDbFactory.Create(nameof(CreateAsync_PersistsLink_Trimmed_AndReturnsDto));
+        var svc = new HighlightService(new HighlightRepository(db));
+        var req = new CreateHighlightRequest
+        {
+            Title = "Test",
+            Body = "body",
+            IconKey = "star",
+            SortOrder = 0,
+            Link = "  https://example.com/guide  "
+        };
+
+        HighlightDto result = await svc.CreateAsync(req);
+
+        Assert.Equal("https://example.com/guide", result.Link);
+    }
+
+    [Fact]
+    public async Task CreateAsync_NormalizesBlankLink_ToNull()
+    {
+        using AppDbContext db = TestDbFactory.Create(nameof(CreateAsync_NormalizesBlankLink_ToNull));
+        var svc = new HighlightService(new HighlightRepository(db));
+        var req = new CreateHighlightRequest
+        {
+            Title = "Test",
+            Body = "body",
+            IconKey = "star",
+            SortOrder = 0,
+            Link = "   "
+        };
+
+        HighlightDto result = await svc.CreateAsync(req);
+
+        Assert.Null(result.Link);
+    }
+
+    [Fact]
+    public async Task UpdateAsync_ReturnsUpdatedDto_WhenFound()
+    {
+        using AppDbContext db = TestDbFactory.Create(nameof(UpdateAsync_ReturnsUpdatedDto_WhenFound));
+        db.Highlights.Add(new VenueHighlight { Title = "Old", Body = "old body", SortOrder = 0 });
+        await db.SaveChangesAsync();
+        int id = db.Highlights.First().Id;
+
+        var svc = new HighlightService(new HighlightRepository(db));
+        var req = new UpdateHighlightRequest
+        {
+            Title = "New",
+            Body = "new body",
+            IconKey = "flame",
+            SortOrder = 5,
+            Link = "https://example.com"
+        };
+
+        HighlightDto? result = await svc.UpdateAsync(id, req);
+
+        Assert.NotNull(result);
+        Assert.Equal("New", result.Title);
+        Assert.Equal("new body", result.Body);
+        Assert.Equal("flame", result.IconKey);
+        Assert.Equal(5, result.SortOrder);
+        Assert.Equal("https://example.com", result.Link);
+    }
+
+    [Fact]
+    public async Task UpdateAsync_ClearsLink_WhenBlankProvided()
+    {
+        using AppDbContext db = TestDbFactory.Create(nameof(UpdateAsync_ClearsLink_WhenBlankProvided));
+        db.Highlights.Add(new VenueHighlight
+        {
+            Title = "H",
+            Body = "b",
+            SortOrder = 0,
+            Link = "https://example.com"
+        });
+        await db.SaveChangesAsync();
+        int id = db.Highlights.First().Id;
+
+        var svc = new HighlightService(new HighlightRepository(db));
+        var req = new UpdateHighlightRequest
+        {
+            Title = "H",
+            Body = "b",
+            IconKey = "star-outline",
+            SortOrder = 0,
+            Link = "   "
+        };
+
+        HighlightDto? result = await svc.UpdateAsync(id, req);
+
+        Assert.NotNull(result);
+        Assert.Null(result.Link);
+    }
+
+    [Fact]
+    public async Task GetAllAsync_MapsLink()
+    {
+        using AppDbContext db = TestDbFactory.Create(nameof(GetAllAsync_MapsLink));
+        db.Highlights.Add(new VenueHighlight
+        {
+            Title = "T",
+            Body = "B",
+            SortOrder = 0,
+            Link = "https://example.com"
+        });
+        await db.SaveChangesAsync();
+
+        var svc = new HighlightService(new HighlightRepository(db));
+        List<HighlightDto> result = await svc.GetAllAsync();
+
+        HighlightDto dto = Assert.Single(result);
+        Assert.Equal("https://example.com", dto.Link);
+    }
+
+    [Fact]
+    public async Task UpdateAsync_ReturnsNull_WhenNotFound()
+    {
+        using AppDbContext db = TestDbFactory.Create(nameof(UpdateAsync_ReturnsNull_WhenNotFound));
+        var svc = new HighlightService(new HighlightRepository(db));
+        var req = new UpdateHighlightRequest { Title = "X", Body = "y", SortOrder = 0 };
+
+        HighlightDto? result = await svc.UpdateAsync(9999, req);
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public async Task DeleteAsync_ReturnsTrue_WhenFound()
+    {
+        using AppDbContext db = TestDbFactory.Create(nameof(DeleteAsync_ReturnsTrue_WhenFound));
+        db.Highlights.Add(new VenueHighlight { Title = "Del", Body = "body", SortOrder = 0 });
+        await db.SaveChangesAsync();
+        int id = db.Highlights.First().Id;
+
+        var svc = new HighlightService(new HighlightRepository(db));
+        bool result = await svc.DeleteAsync(id);
+
+        Assert.True(result);
+        Assert.Equal(0, await db.Highlights.CountAsync());
+    }
+
+    [Fact]
+    public async Task DeleteAsync_ReturnsFalse_WhenNotFound()
+    {
+        using AppDbContext db = TestDbFactory.Create(nameof(DeleteAsync_ReturnsFalse_WhenNotFound));
+        var svc = new HighlightService(new HighlightRepository(db));
+
+        bool result = await svc.DeleteAsync(9999);
+
+        Assert.False(result);
+    }
+
+    // ── Validation (CreateAsync) ────────────────────────────────────────────
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task CreateAsync_RejectsEmptyTitle(string? title)
+    {
+        using AppDbContext db = TestDbFactory.Create($"{nameof(CreateAsync_RejectsEmptyTitle)}_{title}");
+        var svc = new HighlightService(new HighlightRepository(db));
+        var req = new CreateHighlightRequest
+        {
+            Title = title!,
+            Body = "body",
+            IconKey = "star-outline",
+            SortOrder = 0,
+        };
+
+        ValidationException ex = await Assert.ThrowsAsync<ValidationException>(() => svc.CreateAsync(req));
+        Assert.Contains("title cannot be empty", ex.Message);
+        Assert.Equal(0, await db.Highlights.CountAsync());
+    }
+
+    [Fact]
+    public async Task CreateAsync_RejectsOversizedTitle()
+    {
+        using AppDbContext db = TestDbFactory.Create(nameof(CreateAsync_RejectsOversizedTitle));
+        var svc = new HighlightService(new HighlightRepository(db));
+        var req = new CreateHighlightRequest
+        {
+            Title = new string('A', 61),
+            Body = "body",
+            IconKey = "star-outline",
+            SortOrder = 0,
+        };
+
+        ValidationException ex = await Assert.ThrowsAsync<ValidationException>(() => svc.CreateAsync(req));
+        Assert.Contains("title cannot exceed 60", ex.Message);
+    }
+
+    [Fact]
+    public async Task CreateAsync_RejectsOversizedBody()
+    {
+        using AppDbContext db = TestDbFactory.Create(nameof(CreateAsync_RejectsOversizedBody));
+        var svc = new HighlightService(new HighlightRepository(db));
+        var req = new CreateHighlightRequest
+        {
+            Title = "Ok",
+            Body = new string('B', 501),
+            IconKey = "star-outline",
+            SortOrder = 0,
+        };
+
+        ValidationException ex = await Assert.ThrowsAsync<ValidationException>(() => svc.CreateAsync(req));
+        Assert.Contains("body cannot exceed 500", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("not-a-real-icon")]
+    [InlineData("")]
+    public async Task CreateAsync_RejectsUnknownIconKey(string iconKey)
+    {
+        using AppDbContext db = TestDbFactory.Create($"{nameof(CreateAsync_RejectsUnknownIconKey)}_{iconKey}");
+        var svc = new HighlightService(new HighlightRepository(db));
+        var req = new CreateHighlightRequest
+        {
+            Title = "Ok",
+            Body = "body",
+            IconKey = iconKey,
+            SortOrder = 0,
+        };
+
+        ValidationException ex = await Assert.ThrowsAsync<ValidationException>(() => svc.CreateAsync(req));
+        Assert.Contains("Icon key", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("asdf")]                    // bare string, not a URL
+    [InlineData("javascript:alert(1)")]     // dangerous scheme
+    [InlineData("ftp://example.com")]       // disallowed scheme
+    public async Task CreateAsync_RejectsInvalidLink(string link)
+    {
+        using AppDbContext db = TestDbFactory.Create($"{nameof(CreateAsync_RejectsInvalidLink)}_{link}");
+        var svc = new HighlightService(new HighlightRepository(db));
+        var req = new CreateHighlightRequest
+        {
+            Title = "Ok",
+            Body = "body",
+            IconKey = "star-outline",
+            SortOrder = 0,
+            Link = link,
+        };
+
+        ValidationException ex = await Assert.ThrowsAsync<ValidationException>(() => svc.CreateAsync(req));
+        Assert.Contains("valid absolute URL", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("https://example.com")]
+    [InlineData("mailto:hello@example.com")]
+    [InlineData("tel:+15551234567")]
+    public async Task CreateAsync_AcceptsValidLinkSchemes(string link)
+    {
+        using AppDbContext db = TestDbFactory.Create($"{nameof(CreateAsync_AcceptsValidLinkSchemes)}_{link}");
+        var svc = new HighlightService(new HighlightRepository(db));
+        var req = new CreateHighlightRequest
+        {
+            Title = "Ok",
+            Body = "body",
+            IconKey = "star-outline",
+            SortOrder = 0,
+            Link = link,
+        };
+
+        HighlightDto result = await svc.CreateAsync(req);
+
+        Assert.Equal(link, result.Link);
+    }
+
+    [Fact]
+    public async Task CreateAsync_TrimsTitleBodyAndLink()
+    {
+        using AppDbContext db = TestDbFactory.Create(nameof(CreateAsync_TrimsTitleBodyAndLink));
+        var svc = new HighlightService(new HighlightRepository(db));
+        var req = new CreateHighlightRequest
+        {
+            Title = "  Award Winner  ",
+            Body = "  body text  ",
+            IconKey = "trophy-outline",
+            SortOrder = 0,
+            Link = "  https://example.com  ",
+        };
+
+        HighlightDto result = await svc.CreateAsync(req);
+
+        Assert.Equal("Award Winner", result.Title);
+        Assert.Equal("body text", result.Body);
+        Assert.Equal("https://example.com", result.Link);
+    }
+
+    // ── Validation (UpdateAsync) ────────────────────────────────────────────
+
+    [Fact]
+    public async Task UpdateAsync_RejectsInvalidLink()
+    {
+        using AppDbContext db = TestDbFactory.Create(nameof(UpdateAsync_RejectsInvalidLink));
+        db.Highlights.Add(new VenueHighlight
+        {
+            Title = "Old",
+            Body = "old body",
+            SortOrder = 0,
+            Link = "https://old.example.com",
+        });
+        await db.SaveChangesAsync();
+        int id = db.Highlights.First().Id;
+
+        var svc = new HighlightService(new HighlightRepository(db));
+        var req = new UpdateHighlightRequest
+        {
+            Title = "New",
+            Body = "new body",
+            IconKey = "star-outline",
+            SortOrder = 0,
+            Link = "javascript:alert(1)",
+        };
+
+        await Assert.ThrowsAsync<ValidationException>(() => svc.UpdateAsync(id, req));
+
+        // Entity unchanged — validation throws before assignment.
+        VenueHighlight stored = await db.Highlights.FirstAsync();
+        Assert.Equal("https://old.example.com", stored.Link);
+    }
+
+    [Fact]
+    public async Task UpdateAsync_RejectsEmptyTitle()
+    {
+        using AppDbContext db = TestDbFactory.Create(nameof(UpdateAsync_RejectsEmptyTitle));
+        db.Highlights.Add(new VenueHighlight { Title = "Old", Body = "b", SortOrder = 0 });
+        await db.SaveChangesAsync();
+        int id = db.Highlights.First().Id;
+
+        var svc = new HighlightService(new HighlightRepository(db));
+        var req = new UpdateHighlightRequest
+        {
+            Title = "   ",
+            Body = "b",
+            IconKey = "star-outline",
+            SortOrder = 0,
+        };
+
+        await Assert.ThrowsAsync<ValidationException>(() => svc.UpdateAsync(id, req));
+    }
+}

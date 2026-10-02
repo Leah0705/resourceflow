@@ -1,0 +1,85 @@
+namespace ResourceFlowApi.Core.Application.Exceptions;
+
+// Status-oriented exception hierarchy. Each type encodes the HTTP status the
+// GlobalExceptionHandler should map it to. The type itself is the discriminator;
+// no int StatusCode leaks into the domain layer.
+//
+// Note on the Conflict vs. BusinessRule split: InvalidOperationException used to
+// map to *both* 409 (booking-overlap flows) and 400 (admin-edit / same-email flows)
+// depending on the controller. The split here preserves each controller's
+// pre-Bundle-6 status exactly — a service throws ConflictException when its caller
+// returned 409 today, and BusinessRuleException when its caller returned 400.
+
+[Serializable]
+public abstract class ResourceFlowException : Exception
+{
+    /// <summary>
+    /// Stable machine-readable identifier for the specific rule that rejected the request, e.g.
+    /// "booking.paused" (see <see cref="Utilities.ErrorCodes"/>). Nullable so throw sites not yet
+    /// migrated to a code keep compiling.
+    /// </summary>
+    public string? Code { get; init; }
+
+    /// <summary>
+    /// The runtime values <see cref="Exception.Message"/> interpolated, keyed by the placeholder
+    /// name the client's copy for <see cref="Code"/> uses. A client that renders its own wording
+    /// for a code has no way to recover "4" and "6" out of the finished English sentence, so a
+    /// throw site that interpolates anything supplies it here too. Null where the message is a
+    /// constant, which is most of them.
+    /// </summary>
+    public IReadOnlyDictionary<string, object>? Args { get; init; }
+
+    protected ResourceFlowException() { }
+    protected ResourceFlowException(string message) : base(message) { }
+    protected ResourceFlowException(string message, Exception inner) : base(message, inner) { }
+}
+
+// 404 — resource does not exist.
+[Serializable]
+public sealed class NotFoundException : ResourceFlowException
+{
+    public NotFoundException() { }
+    public NotFoundException(string message) : base(message) { }
+    public NotFoundException(string message, Exception inner) : base(message, inner) { }
+}
+
+// 400 — malformed or invalid input (bad shape/value before any state is consulted).
+[Serializable]
+public sealed class ValidationException : ResourceFlowException
+{
+    public ValidationException() { }
+    public ValidationException(string message) : base(message) { }
+    public ValidationException(string message, Exception inner) : base(message, inner) { }
+}
+
+// 409 — concurrent-state clash: the resource already holds a conflicting booking/hold.
+[Serializable]
+public sealed class ConflictException : ResourceFlowException
+{
+    public ConflictException() { }
+    public ConflictException(string message) : base(message) { }
+    public ConflictException(string message, Exception inner) : base(message, inner) { }
+}
+
+// 400 — a domain rule blocks the action given the current state (paused, walk-in,
+// past, capacity-exceeded in admin/edit context, same-email). Resolved by changing the
+// request, not by retrying.
+[Serializable]
+public sealed class BusinessRuleException : ResourceFlowException
+{
+    public BusinessRuleException() { }
+    public BusinessRuleException(string message) : base(message) { }
+    public BusinessRuleException(string message, Exception inner) : base(message, inner) { }
+}
+
+// 500 — infrastructure/config failure (email not configured, admin password missing,
+// SMTP). Outside Development the message reaches the client only when the throw site set a
+// Code, marking it as deliberate client-facing copy; an uncoded one is reported generically
+// so a library's message cannot carry infrastructure detail out with it.
+[Serializable]
+public sealed class InfrastructureException : ResourceFlowException
+{
+    public InfrastructureException() { }
+    public InfrastructureException(string message) : base(message) { }
+    public InfrastructureException(string message, Exception inner) : base(message, inner) { }
+}

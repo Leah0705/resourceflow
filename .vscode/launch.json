@@ -1,0 +1,21 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "chrome",
+      "request": "launch",
+      "name": "Debug Frontend (Chrome)",
+      "url": "http://localhost:8081",
+      "webRoot": "${workspaceFolder}/resourceflow-frontend",
+      "sourceMaps": true
+    },
+    {
+      "type": "msedge",
+      "request": "launch",
+      "name": "Debug Frontend (Edge)",
+      "url": "http://localhost:8081",
+      "webRoot": "${workspaceFolder}/resourceflow-frontend",
+      "sourceMaps": true
+    }
+  ]
+}

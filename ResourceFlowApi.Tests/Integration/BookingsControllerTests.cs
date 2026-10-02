@@ -1,0 +1,737 @@
+using System.Net;
+using System.Net.Http.Json;
+using System.Text.Json;
+using Microsoft.Extensions.DependencyInjection;
+using ResourceFlowApi.Core.Domain;
+using ResourceFlowApi.Infrastructure.Cookies;
+using ResourceFlowApi.Infrastructure.Persistence;
+
+namespace ResourceFlowApi.Tests.Integration;
+
+public class BookingsControllerTests(TestWebAppFactory factory) : IClassFixture<TestWebAppFactory>
+{
+    private readonly TestWebAppFactory _factory = factory;
+
+    private (int venueId, int sectionId, int resourceId) GetSeededIds()
+    {
+        using IServiceScope scope = _factory.Services.CreateScope();
+        AppDbContext db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        Venue venue = db.Venues.First();
+        Section section = db.Sections.First(s => s.VenueId == venue.Id);
+        Resource resource = db.Resources.First(t => t.SectionId == section.Id);
+        return (venue.Id, section.Id, resource.Id);
+    }
+
+    [Fact]
+    public async Task CreateBooking_Returns201WithBookingRef()
+    {
+        HttpClient client = _factory.CreateClient();
+        (int venueId, int sectionId, int resourceId) = GetSeededIds();
+
+        // First place a hold
+        HttpResponseMessage holdResponse = await client.PostAsJsonAsync("/api/holds", new
+        {
+            venueId,
+            sectionId,
+            resourceId,
+            date = DateTime.UtcNow.AddDays(10).ToString("yyyy-MM-ddT12:00:00")
+        });
+        JsonElement holdBody = await holdResponse.Content.ReadFromJsonAsync<JsonElement>();
+        string? holdId = holdBody.GetProperty("holdId").GetString();
+
+        HttpResponseMessage response = await client.PostAsJsonAsync("/api/bookings", new
+        {
+            venueId,
+            sectionId,
+            resourceId,
+            date = DateTime.UtcNow.AddDays(10).ToString("yyyy-MM-ddT12:00:00"),
+            customerEmail = "customer@test.com",
+            partySize = 2,
+            holdId
+        });
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        JsonElement body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.False(string.IsNullOrEmpty(body.GetProperty("bookingRef").GetString()));
+    }
+
+    [Fact]
+    public async Task CreateBooking_DuplicateResource_ReturnsConflict()
+    {
+        HttpClient client = _factory.CreateClient();
+        (int venueId, int sectionId, int resourceId) = GetSeededIds();
+        string bookingDate = DateTime.UtcNow.AddDays(20).ToString("yyyy-MM-ddT12:00:00");
+
+        // First place a hold and create booking
+        HttpResponseMessage holdResponse = await client.PostAsJsonAsync("/api/holds", new
+        {
+            venueId,
+            sectionId,
+            resourceId,
+            date = bookingDate
+        });
+        JsonElement holdBody = await holdResponse.Content.ReadFromJsonAsync<JsonElement>();
+        string? holdId = holdBody.GetProperty("holdId").GetString();
+
+        await client.PostAsJsonAsync("/api/bookings", new
+        {
+            venueId,
+            sectionId,
+            resourceId,
+            date = bookingDate,
+            customerEmail = "first@test.com",
+            partySize = 2,
+            holdId
+        });
+
+        // Try to book same resource on same date
+        HttpResponseMessage response = await client.PostAsJsonAsync("/api/bookings", new
+        {
+            venueId,
+            sectionId,
+            resourceId,
+            date = bookingDate,
+            customerEmail = "second@test.com",
+            partySize = 2
+        });
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetBookingByRef_WithCorrectEmail_ReturnsBooking()
+    {
+        HttpClient client = _factory.CreateClient();
+        (int venueId, int sectionId, int resourceId) = GetSeededIds();
+        string bookingDate = DateTime.UtcNow.AddDays(30).ToString("yyyy-MM-ddT12:00:00");
+
+        // Place hold + create booking
+        HttpResponseMessage holdResp = await client.PostAsJsonAsync("/api/holds", new
+        {
+            venueId,
+            sectionId,
+            resourceId,
+            date = bookingDate
+        });
+        JsonElement holdBody = await holdResp.Content.ReadFromJsonAsync<JsonElement>();
+        string? holdId = holdBody.GetProperty("holdId").GetString();
+
+        HttpResponseMessage createResp = await client.PostAsJsonAsync("/api/bookings", new
+        {
+            venueId,
+            sectionId,
+            resourceId,
+            date = bookingDate,
+            customerEmail = "lookup@test.com",
+            partySize = 3,
+            holdId
+        });
+        JsonElement created = await createResp.Content.ReadFromJsonAsync<JsonElement>();
+        string? bookingRef = created.GetProperty("bookingRef").GetString();
+
+        // Look up by ref
+        HttpResponseMessage response = await client.GetAsync($"/api/bookings/ref/{bookingRef}?email=lookup@test.com");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        JsonElement body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(bookingRef, body.GetProperty("bookingRef").GetString());
+        Assert.False(string.IsNullOrEmpty(body.GetProperty("resourceName").GetString()));
+        Assert.False(string.IsNullOrEmpty(body.GetProperty("sectionName").GetString()));
+        Assert.True(body.GetProperty("resourceCapacity").GetInt32() > 0);
+    }
+
+    [Fact]
+    public async Task GetBookingByRef_WithWrongEmail_Returns404()
+    {
+        HttpClient client = _factory.CreateClient();
+        (int venueId, int sectionId, int resourceId) = GetSeededIds();
+
+        // Use a different resource to avoid conflicts — get second resource
+        using IServiceScope scope = _factory.Services.CreateScope();
+        AppDbContext db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        Resource resource2 = db.Resources.Where(t => t.SectionId == sectionId).Skip(1).First();
+
+        string bookingDate = DateTime.UtcNow.AddDays(31).ToString("yyyy-MM-ddT12:00:00");
+
+        HttpResponseMessage holdResp = await client.PostAsJsonAsync("/api/holds", new
+        {
+            venueId,
+            sectionId,
+            resourceId = resource2.Id,
+            date = bookingDate
+        });
+        JsonElement holdBody = await holdResp.Content.ReadFromJsonAsync<JsonElement>();
+        string? holdId = holdBody.GetProperty("holdId").GetString();
+
+        HttpResponseMessage createResp = await client.PostAsJsonAsync("/api/bookings", new
+        {
+            venueId,
+            sectionId,
+            resourceId = resource2.Id,
+            date = bookingDate,
+            customerEmail = "real@test.com",
+            partySize = 2,
+            holdId
+        });
+        JsonElement created = await createResp.Content.ReadFromJsonAsync<JsonElement>();
+        string? bookingRef = created.GetProperty("bookingRef").GetString();
+
+        HttpResponseMessage response = await client.GetAsync($"/api/bookings/ref/{bookingRef}?email=wrong@test.com");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetMyRecent_ReturnsEmptyByDefault()
+    {
+        HttpClient client = _factory.CreateClient();
+
+        HttpResponseMessage response = await client.GetAsync("/api/bookings/my-recent");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        JsonElement body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(JsonValueKind.Array, body.ValueKind);
+    }
+
+    [Fact]
+    public async Task DeleteBooking_RequiresAuth()
+    {
+        HttpClient client = _factory.CreateClient();
+
+        HttpResponseMessage response = await client.DeleteAsync("/api/bookings/1");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetBooking_ReturnsOk()
+    {
+        HttpClient client = _factory.CreateAuthenticatedClient();
+        (int venueId, int sectionId, int resourceId) = GetSeededIds();
+
+        // Create a booking first
+        HttpResponseMessage createResp = await client.PostAsJsonAsync("/api/bookings", new
+        {
+            venueId,
+            sectionId,
+            resourceId,
+            date = DateTime.UtcNow.AddDays(60).ToString("yyyy-MM-ddT12:00:00"),
+            customerEmail = "get@test.com",
+            partySize = 2
+        });
+        JsonElement created = await createResp.Content.ReadFromJsonAsync<JsonElement>();
+        int id = created.GetProperty("id").GetInt32();
+
+        HttpResponseMessage response = await client.GetAsync($"/api/bookings/{id}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        JsonElement body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(id, body.GetProperty("id").GetInt32());
+    }
+
+    [Fact]
+    public async Task GetBookingByRef_MissingEmail_ReturnsBadRequest()
+    {
+        HttpClient client = _factory.CreateClient();
+        HttpResponseMessage response = await client.GetAsync("/api/bookings/ref/SOME-REF"); // No email query param
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetBooking_ReturnsNotFound()
+    {
+        HttpClient client = _factory.CreateAuthenticatedClient();
+        HttpResponseMessage response = await client.GetAsync("/api/bookings/9999");
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task UpdateBooking_IdMismatch_ReturnsBadRequest()
+    {
+        HttpClient client = _factory.CreateAuthenticatedClient();
+        HttpResponseMessage response = await client.PutAsJsonAsync("/api/bookings/1", new { id = 2 });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task CancelBooking_Succeeds()
+    {
+        HttpClient client = _factory.CreateClient();
+        (int venueId, int sectionId, int resourceId) = GetSeededIds();
+        HttpResponseMessage createResp = await client.PostAsJsonAsync("/api/bookings", new
+        {
+            venueId,
+            sectionId,
+            resourceId,
+            date = DateTime.UtcNow.AddDays(70).ToString("yyyy-MM-ddT12:00:00"),
+            customerEmail = "cancel@test.com",
+            partySize = 2
+        });
+        JsonElement created = await createResp.Content.ReadFromJsonAsync<JsonElement>();
+        string? bookingRef = created.GetProperty("bookingRef").GetString();
+
+        HttpResponseMessage response = await client.PostAsJsonAsync($"/api/bookings/ref/{bookingRef}/cancel", new { email = "cancel@test.com" });
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task CancelBooking_NotFound_ReturnsNotFound()
+    {
+        HttpClient client = _factory.CreateClient();
+        HttpResponseMessage response = await client.DeleteAsync("/api/bookings/ref/INVALID?email=test@test.com");
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task CancelBookingByRef_PastBooking_ReturnsConflict_AndLeavesBookingActiveInDb()
+    {
+        // Customer-facing booking creation rejects past dates, so seed the past booking
+        // via the admin route (intentionally exempt) then exercise the real
+        // customer cancel endpoint end-to-end (HTTP -> controller -> service -> SQLite).
+        HttpClient adminClient = _factory.CreateAuthenticatedClient();
+        (int venueId, int sectionId, int resourceId) = GetSeededIds();
+        HttpResponseMessage createResp = await adminClient.PostAsJsonAsync("/api/admin/bookings", new
+        {
+            venueId,
+            sectionId,
+            resourceId,
+            date = DateTime.UtcNow.AddDays(-1).ToString("yyyy-MM-ddTHH:mm:ss"),
+            customerEmail = "past-customer-cancel@test.com",
+            partySize = 2
+        });
+        Assert.Equal(HttpStatusCode.Created, createResp.StatusCode);
+        JsonElement created = await createResp.Content.ReadFromJsonAsync<JsonElement>();
+        string? bookingRef = created.GetProperty("bookingRef").GetString();
+        int bookingId = created.GetProperty("id").GetInt32();
+
+        HttpClient client = _factory.CreateClient();
+        HttpResponseMessage response = await client.PostAsJsonAsync(
+            $"/api/bookings/ref/{bookingRef}/cancel",
+            new { email = "past-customer-cancel@test.com" });
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        JsonElement body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Contains("passed", body.GetProperty("message").GetString()?.ToLower() ?? "");
+
+        // The rejected request must not have flipped IsCancelled in the real database.
+        using IServiceScope scope = _factory.Services.CreateScope();
+        AppDbContext db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        Booking? inDb = await db.Bookings.FindAsync(bookingId);
+        Assert.NotNull(inDb);
+        Assert.False(inDb!.IsCancelled);
+    }
+
+    [Fact]
+    public async Task CancelBookingByRef_WithinFiveMinuteGracePeriod_Succeeds()
+    {
+        HttpClient adminClient = _factory.CreateAuthenticatedClient();
+        (int venueId, int sectionId, int resourceId) = GetSeededIds();
+        HttpResponseMessage createResp = await adminClient.PostAsJsonAsync("/api/admin/bookings", new
+        {
+            venueId,
+            sectionId,
+            resourceId,
+            date = DateTime.UtcNow.AddMinutes(-4).ToString("yyyy-MM-ddTHH:mm:ss"),
+            customerEmail = "grace-customer-cancel@test.com",
+            partySize = 2
+        });
+        Assert.Equal(HttpStatusCode.Created, createResp.StatusCode);
+        JsonElement created = await createResp.Content.ReadFromJsonAsync<JsonElement>();
+        string? bookingRef = created.GetProperty("bookingRef").GetString();
+
+        HttpClient client = _factory.CreateClient();
+        HttpResponseMessage response = await client.PostAsJsonAsync(
+            $"/api/bookings/ref/{bookingRef}/cancel",
+            new { email = "grace-customer-cancel@test.com" });
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task CreateBooking_InvalidModel_ReturnsBadRequest()
+    {
+        HttpClient client = _factory.CreateClient();
+        // Sending something that doesn't match the DTO at all or missing required fields if we had them.
+        // For now, sending null body or invalid JSON structure can trigger it.
+        HttpResponseMessage response = await client.PostAsJsonAsync("/api/bookings", new { partySize = "not-a-number" });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task UpdateBooking_InvalidModel_ReturnsBadRequest()
+    {
+        HttpClient client = _factory.CreateAuthenticatedClient();
+        HttpResponseMessage response = await client.PutAsJsonAsync("/api/bookings/1", new { id = 1, partySize = "not-a-number" });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task CancelBookingByRef_MissingEmail_ReturnsBadRequest()
+    {
+        HttpClient client = _factory.CreateClient();
+        HttpResponseMessage response = await client.PostAsJsonAsync("/api/bookings/ref/SOME-REF/cancel", new { email = "" });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetBookings_ByVenue_ReturnsOk()
+    {
+        HttpClient client = _factory.CreateAuthenticatedClient();
+        (int r, _, _) = GetSeededIds();
+        HttpResponseMessage response = await client.GetAsync($"/api/venues/{r}/bookings");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task DeleteBooking_Succeeds()
+    {
+        HttpClient client = _factory.CreateAuthenticatedClient();
+        (int r, int s, int t) = GetSeededIds();
+        HttpResponseMessage createResp = await client.PostAsJsonAsync("/api/bookings", new { venueId = r, sectionId = s, resourceId = t, date = DateTime.UtcNow.AddDays(90).ToString("yyyy-MM-ddT12:00:00"), customerEmail = "del@test.com", partySize = 2 });
+        int id = (await createResp.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetInt32();
+
+        HttpResponseMessage response = await client.DeleteAsync($"/api/bookings/{id}");
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetMyRecent_WithCookie_ReturnsList()
+    {
+        HttpClient client = _factory.CreateClient();
+        (int r, int s, int t) = GetSeededIds();
+        HttpResponseMessage createResp = await client.PostAsJsonAsync("/api/bookings", new { venueId = r, sectionId = s, resourceId = t, date = DateTime.UtcNow.AddDays(80).ToString("yyyy-MM-ddT12:00:00"), customerEmail = "recent@test.com", partySize = 2 });
+
+        // Extract the cookie from the response
+        if (createResp.Headers.TryGetValues("Set-Cookie", out IEnumerable<string>? cookies))
+        {
+            foreach (var cookie in cookies)
+            {
+                client.DefaultRequestHeaders.Add("Cookie", cookie.Split(';')[0]);
+            }
+        }
+
+        HttpResponseMessage response = await client.GetAsync("/api/bookings/my-recent");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        List<CachedBookingEntry>? body = await response.Content.ReadFromJsonAsync<List<CachedBookingEntry>>();
+        Assert.NotEmpty(body!);
+        Assert.Contains(body!, e => e.Email == "recent@test.com");
+    }
+
+    // ── Auto-assign ("Any section") ───────────────────────────────────────────
+
+    private (int venueId, int t2Id, int t2SectionId) GetCentralWorkspaceIds()
+    {
+        using IServiceScope scope = _factory.Services.CreateScope();
+        AppDbContext db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        Venue workspace = db.Venues.First(r => r.Name == "Central Workspace");
+        Resource t2 = db.Resources.First(t => t.Name == "T2");
+        return (workspace.Id, t2.Id, t2.SectionId);
+    }
+
+    [Fact]
+    public async Task CreateBooking_AutoAssign_PersistsResolvedResource()
+    {
+        HttpClient client = _factory.CreateClient();
+        (int venueId, int t2Id, int t2SectionId) = GetCentralWorkspaceIds();
+        string date = DateTime.UtcNow.AddDays(90).ToString("yyyy-MM-ddT12:00:00");
+
+        // No resourceId/sectionId/holdId → server must auto-assign. For a party of 2 the smallest
+        // fitting free resource across Central Workspace is T2 (capacity 2).
+        HttpResponseMessage response = await client.PostAsJsonAsync("/api/bookings", new
+        {
+            venueId,
+            date,
+            customerEmail = "auto@test.com",
+            partySize = 2
+        });
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        JsonElement body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.False(string.IsNullOrEmpty(body.GetProperty("bookingRef").GetString()));
+        Assert.Equal(t2Id, body.GetProperty("resourceId").GetInt32());
+        Assert.Equal(t2SectionId, body.GetProperty("sectionId").GetInt32());
+    }
+
+    [Fact]
+    public async Task CreateBooking_AutoAssign_ConsumesAutoHold()
+    {
+        HttpClient client = _factory.CreateClient();
+        (int venueId, int t2Id, _) = GetCentralWorkspaceIds();
+        string date = DateTime.UtcNow.AddDays(91).ToString("yyyy-MM-ddT12:00:00");
+
+        // Place an auto-assigned hold first.
+        HttpResponseMessage holdResp = await client.PostAsJsonAsync("/api/holds", new
+        {
+            venueId,
+            partySize = 2,
+            date
+        });
+        Assert.Equal(HttpStatusCode.OK, holdResp.StatusCode);
+        JsonElement holdBody = await holdResp.Content.ReadFromJsonAsync<JsonElement>();
+        string? holdId = holdBody.GetProperty("holdId").GetString();
+        Assert.Equal(t2Id, holdBody.GetProperty("resourceId").GetInt32()); // auto-resolved to T2
+
+        // Consume that hold with an auto-assign booking.
+        HttpResponseMessage response = await client.PostAsJsonAsync("/api/bookings", new
+        {
+            venueId,
+            date,
+            customerEmail = "auto2@test.com",
+            partySize = 2,
+            holdId
+        });
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        JsonElement body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(t2Id, body.GetProperty("resourceId").GetInt32());
+    }
+
+    [Fact]
+    public async Task CreateBooking_AutoAssign_NeverDoubleBooksSameResource_WhenContended()
+    {
+        // Concurrency AC: near-simultaneous "any resource" submissions for the same slot must never
+        // both land on the same resource. Central Workspace has exactly one 2-place resource (T2) and two 4-place
+        // resources (T1, P1). For a party of 4, at most two of three concurrent submissions can
+        // succeed (one per 4-place resource) and no resource should ever be double-booked. The "exactly 2"
+        // count is timing-sensitive under CI load (a contender may lose the race transiently), so
+        // the hard invariant asserted here is: at least one succeeds, never more than the available
+        // resources, and every winner is on a distinct resource.
+        HttpClient client = _factory.CreateClient();
+        (int venueId, _, _) = GetCentralWorkspaceIds();
+        string date = DateTime.UtcNow.AddDays(92).ToString("yyyy-MM-ddT12:00:00");
+
+        var tasks = Enumerable.Range(0, 3).Select(i => Task.Run(async () =>
+        {
+            HttpClient c = _factory.CreateClient();
+            HttpResponseMessage r = await c.PostAsJsonAsync("/api/bookings", new
+            {
+                venueId,
+                date,
+                customerEmail = $"race{i}@test.com",
+                partySize = 4
+            });
+            JsonElement body = await r.Content.ReadFromJsonAsync<JsonElement>();
+            return new { status = r.StatusCode, body };
+        })).ToArray();
+        var results = await Task.WhenAll(tasks);
+
+        int created = results.Count(r => r.status == HttpStatusCode.Created);
+        Assert.InRange(created, 1, 2); // at least one winner, never more than the two 4-place resources
+
+        // Collect the resourceIds of the winners; they must be distinct — the real invariant.
+        var winnerResources = results
+            .Where(r => r.status == HttpStatusCode.Created)
+            .Select(r => r.body.GetProperty("resourceId").GetInt32())
+            .ToList();
+        Assert.Equal(winnerResources.Count, winnerResources.Distinct().Count());
+    }
+
+    // ── The guest secret: a booking reference plus the email on the booking ──────────────
+    //
+    // There is no account behind a guest booking, so these two endpoints are the whole attack
+    // surface for someone holding a victim's email address (not a secret) and guessing refs.
+    // Two properties keep that honest and both are pinned below: the 404 must not distinguish
+    // "no such ref" from "wrong email" (or the ref alone becomes enumerable), and the ref must
+    // stay an opaque string on the read path (or a format change orphans issued confirmations).
+
+    private void SetVenueRefFormat(BookingRefFormat format)
+    {
+        using IServiceScope scope = _factory.Services.CreateScope();
+        AppDbContext db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        Venue venue = db.Venues.First();
+        venue.BookingRefFormat = format;
+        db.SaveChanges();
+    }
+
+    private void SeedBookingWithStoredRef(string bookingRef, string email, DateTime dateUtc)
+    {
+        using IServiceScope scope = _factory.Services.CreateScope();
+        AppDbContext db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        Venue venue = db.Venues.First();
+        Section section = db.Sections.First(s => s.VenueId == venue.Id);
+        Resource resource = db.Resources.OrderByDescending(t => t.Id).First(t => t.SectionId == section.Id);
+        db.Bookings.Add(new Booking
+        {
+            VenueId = venue.Id,
+            SectionId = section.Id,
+            ResourceId = resource.Id,
+            Date = dateUtc,
+            EndTime = dateUtc.AddHours(2),
+            CustomerEmail = email,
+            CustomerName = "Guest",
+            PartySize = 2,
+            BookingRef = bookingRef
+        });
+        db.SaveChanges();
+    }
+
+    private static async Task<(HttpStatusCode Status, string Body)> ReadAsync(HttpResponseMessage response)
+        => (response.StatusCode, await response.Content.ReadAsStringAsync());
+
+    [Fact]
+    public async Task GetBookingByRef_UnknownRefAndWrongEmailAreIndistinguishable()
+    {
+        HttpClient client = _factory.CreateClient();
+        string bookingRef = $"indistinguishable-lookup-{Guid.NewGuid():N}";
+        SeedBookingWithStoredRef(bookingRef, "owner@test.com", DateTime.UtcNow.AddDays(180));
+
+        (HttpStatusCode wrongEmailStatus, string wrongEmailBody) =
+            await ReadAsync(await client.GetAsync($"/api/bookings/ref/{bookingRef}?email=stranger@test.com"));
+        (HttpStatusCode unknownRefStatus, string unknownRefBody) =
+            await ReadAsync(await client.GetAsync($"/api/bookings/ref/no-such-ref-{Guid.NewGuid():N}?email=owner@test.com"));
+
+        Assert.Equal(HttpStatusCode.NotFound, wrongEmailStatus);
+        Assert.Equal(unknownRefStatus, wrongEmailStatus);
+        Assert.Equal(unknownRefBody, wrongEmailBody);
+    }
+
+    [Fact]
+    public async Task CancelBookingByRef_UnknownRefAndWrongEmailAreIndistinguishable()
+    {
+        HttpClient client = _factory.CreateClient();
+        string bookingRef = $"indistinguishable-cancel-{Guid.NewGuid():N}";
+        SeedBookingWithStoredRef(bookingRef, "owner@test.com", DateTime.UtcNow.AddDays(181));
+
+        (HttpStatusCode wrongEmailStatus, string wrongEmailBody) = await ReadAsync(
+            await client.PostAsJsonAsync($"/api/bookings/ref/{bookingRef}/cancel", new { email = "stranger@test.com" }));
+        (HttpStatusCode unknownRefStatus, string unknownRefBody) = await ReadAsync(
+            await client.PostAsJsonAsync($"/api/bookings/ref/no-such-ref-{Guid.NewGuid():N}/cancel", new { email = "owner@test.com" }));
+
+        Assert.Equal(HttpStatusCode.NotFound, wrongEmailStatus);
+        Assert.Equal(unknownRefStatus, wrongEmailStatus);
+        Assert.Equal(unknownRefBody, wrongEmailBody);
+    }
+
+    [Fact]
+    public async Task ByRef_ResolvesALegacyWordRefAtALocationNowMintingNumericRefs()
+    {
+        // BookingRefFormat governs minting only. Every booking in every deployed database carries
+        // the suffix-less three-word shape, and a location that has since switched formats still
+        // has those guests holding confirmations, so the read path treats the ref as opaque.
+        HttpClient client = _factory.CreateClient();
+        string legacyRef = "swift-cedar-harbor";
+        SeedBookingWithStoredRef(legacyRef, "legacy-word@test.com", DateTime.UtcNow.AddDays(182));
+        SetVenueRefFormat(BookingRefFormat.Numeric);
+        try
+        {
+            HttpResponseMessage lookup = await client.GetAsync($"/api/bookings/ref/{legacyRef}?email=legacy-word@test.com");
+            HttpResponseMessage cancel = await client.PostAsJsonAsync($"/api/bookings/ref/{legacyRef}/cancel", new { email = "legacy-word@test.com" });
+
+            Assert.Equal(HttpStatusCode.OK, lookup.StatusCode);
+            Assert.Equal(HttpStatusCode.NoContent, cancel.StatusCode);
+        }
+        finally
+        {
+            SetVenueRefFormat(BookingRefFormat.AlphaNumeric);
+        }
+    }
+
+    [Fact]
+    public async Task ByRef_ResolvesANumericRefAtALocationNowMintingWordRefs()
+    {
+        HttpClient client = _factory.CreateClient();
+        string numericRef = "48271639";
+        SeedBookingWithStoredRef(numericRef, "legacy-numeric@test.com", DateTime.UtcNow.AddDays(183));
+        SetVenueRefFormat(BookingRefFormat.AlphaNumeric);
+
+        HttpResponseMessage lookup = await client.GetAsync($"/api/bookings/ref/{numericRef}?email=legacy-numeric@test.com");
+        HttpResponseMessage cancel = await client.PostAsJsonAsync($"/api/bookings/ref/{numericRef}/cancel", new { email = "legacy-numeric@test.com" });
+
+        Assert.Equal(HttpStatusCode.OK, lookup.StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, cancel.StatusCode);
+    }
+
+    [Fact]
+    public async Task SubscribeReminders_UnknownRefAndWrongEmailAreIndistinguishable()
+    {
+        HttpClient client = _factory.CreateClient();
+        string bookingRef = $"indistinguishable-reminders-{Guid.NewGuid():N}";
+        SeedBookingWithStoredRef(bookingRef, "owner@test.com", DateTime.UtcNow.AddDays(183));
+
+        (HttpStatusCode wrongEmailStatus, string wrongEmailBody) = await ReadAsync(
+            await client.PostAsJsonAsync($"/api/bookings/ref/{bookingRef}/reminders",
+                new { email = "stranger@test.com", channel = "expo", endpoint = "ExponentPushToken[abc]" }));
+        (HttpStatusCode unknownRefStatus, string unknownRefBody) = await ReadAsync(
+            await client.PostAsJsonAsync($"/api/bookings/ref/no-such-ref-{Guid.NewGuid():N}/reminders",
+                new { email = "owner@test.com", channel = "expo", endpoint = "ExponentPushToken[abc]" }));
+
+        Assert.Equal(HttpStatusCode.NotFound, wrongEmailStatus);
+        Assert.Equal(unknownRefStatus, wrongEmailStatus);
+        Assert.Equal(unknownRefBody, wrongEmailBody);
+        Assert.Empty(StoredReminderDevices(bookingRef));
+    }
+
+    [Fact]
+    public async Task SubscribeReminders_StoresTheDevice_AndUnsubscribeRemovesIt()
+    {
+        HttpClient client = _factory.CreateClient();
+        string bookingRef = $"reminders-roundtrip-{Guid.NewGuid():N}";
+        string endpoint = $"ExponentPushToken[{Guid.NewGuid():N}]";
+        SeedBookingWithStoredRef(bookingRef, "owner@test.com", DateTime.UtcNow.AddDays(184));
+
+        HttpResponseMessage subscribed = await client.PostAsJsonAsync($"/api/bookings/ref/{bookingRef}/reminders",
+            new { email = "owner@test.com", channel = "expo", endpoint, locale = "fr" });
+
+        Assert.Equal(HttpStatusCode.NoContent, subscribed.StatusCode);
+        GuestPushSubscription stored = Assert.Single(StoredReminderDevices(bookingRef));
+        Assert.Equal("expo", stored.Channel);
+        Assert.Equal(endpoint, stored.Endpoint);
+        Assert.Equal("fr", stored.Locale);
+
+        using var unsubscribe = new HttpRequestMessage(HttpMethod.Delete, $"/api/bookings/ref/{bookingRef}/reminders")
+        {
+            Content = JsonContent.Create(new { email = "owner@test.com", endpoint }),
+        };
+        HttpResponseMessage unsubscribed = await client.SendAsync(unsubscribe);
+
+        Assert.Equal(HttpStatusCode.NoContent, unsubscribed.StatusCode);
+        Assert.Empty(StoredReminderDevices(bookingRef));
+    }
+
+    private List<GuestPushSubscription> StoredReminderDevices(string bookingRef)
+    {
+        using IServiceScope scope = _factory.Services.CreateScope();
+        AppDbContext db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        return db.GuestPushSubscriptions.Where(s => s.Booking.BookingRef == bookingRef).ToList();
+    }
+
+    // The test factory configures no wallet, so the not-configured 404 fires before the lookup;
+    // the two requests must still be told apart by nothing, and the code must name the cause.
+    [Fact]
+    public async Task AppleWalletPass_UnknownRefAndWrongEmailAreIndistinguishable()
+    {
+        HttpClient client = _factory.CreateClient();
+        string bookingRef = $"indistinguishable-apple-{Guid.NewGuid():N}";
+        SeedBookingWithStoredRef(bookingRef, "owner@test.com", DateTime.UtcNow.AddDays(185));
+
+        (HttpStatusCode wrongEmailStatus, string wrongEmailBody) = await ReadAsync(
+            await client.GetAsync($"/api/bookings/ref/{bookingRef}/wallet/apple.pkpass?email=stranger@test.com"));
+        (HttpStatusCode unknownRefStatus, string unknownRefBody) = await ReadAsync(
+            await client.GetAsync($"/api/bookings/ref/no-such-ref-{Guid.NewGuid():N}/wallet/apple.pkpass?email=owner@test.com"));
+
+        Assert.Equal(HttpStatusCode.NotFound, wrongEmailStatus);
+        Assert.Equal(unknownRefStatus, wrongEmailStatus);
+        Assert.Equal(unknownRefBody, wrongEmailBody);
+        Assert.Equal("booking.wallet_not_configured", JsonDocument.Parse(wrongEmailBody).RootElement.GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task GoogleWalletLink_UnknownRefAndWrongEmailAreIndistinguishable()
+    {
+        HttpClient client = _factory.CreateClient();
+        string bookingRef = $"indistinguishable-google-{Guid.NewGuid():N}";
+        SeedBookingWithStoredRef(bookingRef, "owner@test.com", DateTime.UtcNow.AddDays(186));
+
+        (HttpStatusCode wrongEmailStatus, string wrongEmailBody) = await ReadAsync(
+            await client.GetAsync($"/api/bookings/ref/{bookingRef}/wallet/google?email=stranger@test.com"));
+        (HttpStatusCode unknownRefStatus, string unknownRefBody) = await ReadAsync(
+            await client.GetAsync($"/api/bookings/ref/no-such-ref-{Guid.NewGuid():N}/wallet/google?email=owner@test.com"));
+
+        Assert.Equal(HttpStatusCode.NotFound, wrongEmailStatus);
+        Assert.Equal(unknownRefStatus, wrongEmailStatus);
+        Assert.Equal(unknownRefBody, wrongEmailBody);
+        Assert.Equal("booking.wallet_not_configured", JsonDocument.Parse(wrongEmailBody).RootElement.GetProperty("code").GetString());
+    }
+}

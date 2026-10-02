@@ -1,0 +1,81 @@
+using System.ComponentModel.DataAnnotations;
+using ResourceFlowApi.Core.Application.Utilities;
+
+namespace ResourceFlowApi.Core.Domain;
+
+public class BrandSettings
+{
+    public int Id { get; set; }
+
+    [StringLength(32)]
+    public string AppName { get; set; } = "ResourceFlow";
+    public string PrimaryColor { get; set; } = "#0a7ea4";
+    public string? AccentColor { get; set; }
+
+    public string? HeaderImageUrl { get; set; }
+
+    [StringLength(32)]
+    public string? FaviconIcon { get; set; }
+
+    public string? WebsiteUrl { get; set; }
+
+    /// <summary>
+    /// Default contact phone number, used wherever a location has no
+    /// <see cref="Venue.PhoneNumber"/> of its own.
+    /// </summary>
+    [StringLength(ContactLimits.MaxPhoneLength)]
+    public string? PhoneNumber { get; set; }
+
+    /// <summary>
+    /// Default contact email address, used wherever a location has no
+    /// <see cref="Venue.EmailAddress"/> of its own.
+    /// </summary>
+    [StringLength(ContactLimits.MaxEmailLength)]
+    public string? EmailAddress { get; set; }
+
+    [StringLength(200)]
+    public string? CopyrightText { get; set; }
+
+    /// <summary>
+    /// Short tagline shown under <see cref="AppName"/> on the home page, in place of the
+    /// hard-coded default subheading. Null falls back to the default copy.
+    /// </summary>
+    [StringLength(160)]
+    public string? Subtitle { get; set; }
+
+    /// <summary>
+    /// Optional heading text above the home page highlights section
+    /// (defaults to "Spaces and facilities" when null).
+    /// </summary>
+    [StringLength(60)]
+    public string? HighlightsHeading { get; set; }
+
+    /// <summary>
+    /// Optional subheading text above the home page highlights section
+    /// (defaults to "Curated by the owner" when null).
+    /// </summary>
+    [StringLength(60)]
+    public string? HighlightsSubheading { get; set; }
+
+    /// <summary>
+    /// Where this instance's privacy policy is published, as an absolute http(s) URL. Both app
+    /// stores require one before a listing can go live, and the guest footer links it when set.
+    /// </summary>
+    [StringLength(2048)]
+    public string? PrivacyPolicyUrl { get; set; }
+
+    /// <summary>
+    /// The oldest native app version this server still supports, as strict
+    /// <c>major.minor.patch</c> (see <see cref="NativeAppVersion"/>). Null means every build is
+    /// accepted.
+    /// </summary>
+    [StringLength(NativeAppVersion.MaxLength)]
+    public string? MinimumAppVersion { get; set; }
+
+    /// <summary>
+    /// How the home page hero image is fit into its frame. Null/"Cover" (the default)
+    /// keeps today's behaviour; "Contain" shows the whole image. See <see cref="HeaderImageFit"/>.
+    /// </summary>
+    [StringLength(10)]
+    public string? HeaderImageFit { get; set; }
+}

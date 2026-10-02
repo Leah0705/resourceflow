@@ -1,0 +1,38 @@
+import { Stack, useLocalSearchParams } from "expo-router";
+import { useBrand } from "@/context/BrandContext";
+import LocationsScreen from "@/components/venue/LocationsScreen";
+
+/**
+ * Deep-link entry into the Locations list: renders the same screen as
+ * `locations/index` but expands + scrolls to a specific location on mount,
+ * with optional `time`/`party` prefilled into its booking form, or with `waitlist` set to open
+ * its walk-in waitlist instead. This is the
+ * target of `VenueCard` slot clicks and the old `/book/[venueId]`
+ * and `/venue/[id]` redirects.
+ */
+export default function LocationsDetailScreen() {
+  const brand = useBrand();
+  const { id, time, party, waitlist } = useLocalSearchParams<{
+    id: string;
+    time?: string;
+    party?: string;
+    waitlist?: string;
+  }>();
+  const highlightId = id ? Number(id) : undefined;
+  const initialPartySize = party
+    ? Math.max(1, Math.min(10, parseInt(party, 10))) || undefined
+    : undefined;
+
+  return (
+    <>
+      <Stack.Screen options={{ title: brand.appName }} />
+      <LocationsScreen
+        highlightId={Number.isFinite(highlightId) ? highlightId : undefined}
+        initialTime={time || undefined}
+        initialPartySize={initialPartySize}
+        initialWaitlist={waitlist === "1"}
+        hasNativeHeader
+      />
+    </>
+  );
+}

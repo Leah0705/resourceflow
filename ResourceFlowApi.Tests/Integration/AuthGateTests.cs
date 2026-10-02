@@ -1,0 +1,354 @@
+using System.Net;
+using System.Net.Http.Json;
+using System.Text;
+using System.Text.Json;
+
+namespace ResourceFlowApi.Tests.Integration;
+
+/// <summary>
+/// Exhaustive auth gate tests — every admin/protected endpoint must return 401
+/// when called without a valid JWT. If any test here fails, it means an endpoint
+/// is accidentally exposed to the public.
+/// </summary>
+public class AuthGateTests : IClassFixture<TestWebAppFactory>
+{
+    private readonly HttpClient _client;
+
+    public AuthGateTests(TestWebAppFactory factory)
+    {
+        // Unauthenticated client — no JWT
+        _client = factory.CreateClient();
+    }
+
+    private static StringContent Json(object body) =>
+        new(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
+
+    // ── AdminController (all endpoints require [Authorize] at class level) ────
+
+    [Fact]
+    public async Task Admin_Overview_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.GetAsync("/api/admin/overview")).StatusCode);
+
+    [Fact]
+    public async Task Admin_GetBookings_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.GetAsync("/api/admin/bookings?venueId=1")).StatusCode);
+
+    [Fact]
+    public async Task Admin_GetBooking_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.GetAsync("/api/admin/bookings/1")).StatusCode);
+
+    [Fact]
+    public async Task Admin_CreateBooking_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.PostAsync("/api/admin/bookings", Json(new { }))).StatusCode);
+
+    [Fact]
+    public async Task Admin_CancelBookingAction_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.PostAsync("/api/admin/bookings/1/cancel", null)).StatusCode);
+
+    [Fact]
+    public async Task Admin_ExtendBooking_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.PostAsync("/api/admin/bookings/1/extend", Json(new { minutes = 30 }))).StatusCode);
+
+    [Fact]
+    public async Task Admin_SoftDeleteBooking_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.DeleteAsync("/api/admin/bookings/1")).StatusCode);
+
+    [Fact]
+    public async Task Admin_CancelBooking_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.PostAsync("/api/admin/bookings/1/cancel", null)).StatusCode);
+
+    [Fact]
+    public async Task Admin_CreateVenue_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.PostAsync("/api/admin/venues", Json(new { name = "Test" }))).StatusCode);
+
+    [Fact]
+    public async Task Admin_DeleteVenue_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.DeleteAsync("/api/admin/venues/1")).StatusCode);
+
+    [Fact]
+    public async Task Admin_GetResources_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.GetAsync("/api/admin/venues/1/resources")).StatusCode);
+
+    [Fact]
+    public async Task Admin_SendEmail_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.PostAsync("/api/admin/bookings/1/email",
+                Json(new { subject = "Hi", body = "Test" }))).StatusCode);
+
+    [Fact]
+    public async Task Admin_RestoreBooking_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.PostAsync("/api/admin/bookings/1/restore", null)).StatusCode);
+
+    [Fact]
+    public async Task Admin_FullUpdateBooking_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.PutAsync("/api/admin/bookings/1", Json(new { }))).StatusCode);
+
+    [Fact]
+    public async Task Admin_GetVenues_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.GetAsync("/api/admin/venues")).StatusCode);
+
+    [Fact]
+    public async Task Admin_GetSections_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.GetAsync("/api/admin/venues/1/sections")).StatusCode);
+
+    // ── AuthController (protected endpoints) ─────────────────────────────────
+
+    [Fact]
+    public async Task Auth_Me_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.GetAsync("/api/admin/auth/me")).StatusCode);
+
+    [Fact]
+    public async Task Auth_ChangePassword_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.PostAsync("/api/admin/auth/change-password",
+                Json(new { currentPassword = "x", newPassword = "y" }))).StatusCode);
+
+    [Fact]
+    public async Task Auth_PvqSetup_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.PostAsync("/api/admin/auth/pvq/setup",
+                Json(new { question = "q", answer = "a" }))).StatusCode);
+
+    [Fact]
+    public async Task Auth_PvqMe_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.GetAsync("/api/admin/auth/pvq/me")).StatusCode);
+
+    // ── UsersController (Owner-only user management) ─────────────────────────
+
+    [Fact]
+    public async Task Users_List_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.GetAsync("/api/admin/users")).StatusCode);
+
+    [Fact]
+    public async Task Users_Create_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.PostAsync("/api/admin/users",
+                Json(new { email = "x@x.com", password = "password", role = "Manager" }))).StatusCode);
+
+    [Fact]
+    public async Task Users_UpdateRole_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.PatchAsync("/api/admin/users/1/role", Json(new { role = "Manager" }))).StatusCode);
+
+    [Fact]
+    public async Task Users_SetActive_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.PatchAsync("/api/admin/users/1/active", Json(new { isActive = false }))).StatusCode);
+
+    [Fact]
+    public async Task Users_ResetPassword_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.PostAsync("/api/admin/users/1/reset-password",
+                Json(new { newPassword = "password" }))).StatusCode);
+
+    // ── EmailSettingsController ([Authorize] at class level) ─────────────────
+
+    [Fact]
+    public async Task EmailSettings_Get_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.GetAsync("/api/admin/email-settings")).StatusCode);
+
+    [Fact]
+    public async Task EmailSettings_Save_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.PatchAsync("/api/admin/email-settings",
+                Json(new { host = "smtp.test.com", port = 587 }))).StatusCode);
+
+    [Fact]
+    public async Task EmailSettings_Test_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.PostAsync("/api/admin/email-settings/test", null)).StatusCode);
+
+    // ── BrandController (POST requires [Authorize], GET is public) ───────────
+
+    [Fact]
+    public async Task Brand_Save_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.PatchAsync("/api/brand",
+                Json(new { appName = "Hacked" }))).StatusCode);
+
+    [Fact]
+    public async Task Brand_Get_IsPublic()
+    {
+        HttpResponseMessage res = await _client.GetAsync("/api/brand");
+        Assert.NotEqual(HttpStatusCode.Unauthorized, res.StatusCode);
+    }
+
+    // ── VenuesController (mutations require [Authorize], reads are public) ──
+
+    [Fact]
+    public async Task Venues_List_IsPublic()
+    {
+        HttpResponseMessage res = await _client.GetAsync("/api/venues");
+        Assert.NotEqual(HttpStatusCode.Unauthorized, res.StatusCode);
+    }
+
+    [Fact]
+    public async Task Venues_Create_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.PostAsync("/api/venues",
+                Json(new { name = "Hacked", address = "Evil St" }))).StatusCode);
+
+    [Fact]
+    public async Task Venues_Update_Returns401()
+    {
+        HttpResponseMessage res = await _client.PutAsync("/api/venues/1",
+            Json(new { name = "Hacked" }));
+        Assert.Equal(HttpStatusCode.Unauthorized, res.StatusCode);
+    }
+
+    [Fact]
+    public async Task Venues_AddSection_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.PostAsync("/api/venues/1/sections",
+                Json(new { name = "Evil" }))).StatusCode);
+
+    [Fact]
+    public async Task Venues_UpdateSection_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.PutAsync("/api/venues/1/sections/1",
+                Json(new { name = "Evil" }))).StatusCode);
+
+    [Fact]
+    public async Task Venues_DeleteSection_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.DeleteAsync("/api/venues/1/sections/1")).StatusCode);
+
+    [Fact]
+    public async Task Venues_AddResource_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.PostAsync("/api/venues/1/sections/1/resources",
+                Json(new { name = "T1", capacity = 4 }))).StatusCode);
+
+    [Fact]
+    public async Task Venues_UpdateResource_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.PutAsync("/api/venues/1/sections/1/resources/1",
+                Json(new { name = "T1", capacity = 4 }))).StatusCode);
+
+    [Fact]
+    public async Task Venues_DeleteResource_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.DeleteAsync("/api/venues/1/sections/1/resources/1")).StatusCode);
+
+    // ── BookingsController (some endpoints require [Authorize]) ──────────────
+
+    [Fact]
+    public async Task Bookings_GetById_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.GetAsync("/api/bookings/1")).StatusCode);
+
+    [Fact]
+    public async Task Bookings_Update_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.PutAsync("/api/bookings/1",
+                Json(new { partySize = 4 }))).StatusCode);
+
+    [Fact]
+    public async Task Bookings_Delete_Returns401() =>
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.DeleteAsync("/api/bookings/1")).StatusCode);
+
+    // ── Public endpoints (should NOT return 401) ─────────────────────────────
+
+    [Fact]
+    public async Task Bookings_Create_IsPublic()
+    {
+        // Should return 400 (bad request) not 401 — the endpoint is public
+        HttpResponseMessage res = await _client.PostAsync("/api/bookings", Json(new { }));
+        Assert.NotEqual(HttpStatusCode.Unauthorized, res.StatusCode);
+    }
+
+    [Fact]
+    public async Task Bookings_GetByRef_IsPublic()
+    {
+        HttpResponseMessage res = await _client.GetAsync("/api/bookings/ref/nonexistent?email=a@b.com");
+        Assert.NotEqual(HttpStatusCode.Unauthorized, res.StatusCode);
+    }
+
+    [Fact]
+    public async Task Bookings_MyRecent_IsPublic()
+    {
+        HttpResponseMessage res = await _client.GetAsync("/api/bookings/my-recent");
+        Assert.NotEqual(HttpStatusCode.Unauthorized, res.StatusCode);
+    }
+
+    [Fact]
+    public async Task Holds_Create_IsPublic()
+    {
+        HttpResponseMessage res = await _client.PostAsync("/api/holds", Json(new { }));
+        Assert.NotEqual(HttpStatusCode.Unauthorized, res.StatusCode);
+    }
+
+    [Fact]
+    public async Task Holds_Release_IsPublic()
+    {
+        HttpResponseMessage res = await _client.DeleteAsync("/api/holds/nonexistent");
+        Assert.NotEqual(HttpStatusCode.Unauthorized, res.StatusCode);
+    }
+
+    [Fact]
+    public async Task Auth_Login_IsPublic()
+    {
+        // Login is public — wrong credentials return 401 with a message body,
+        // not a bare 401 from auth middleware. Verify the endpoint is reachable
+        // by checking that it returns a JSON body (middleware 401s have no body).
+        HttpResponseMessage res = await _client.PostAsync("/api/admin/auth/login",
+            Json(new { email = "x@x.com", password = "wrong" }));
+        string body = await res.Content.ReadAsStringAsync();
+        Assert.Contains("Invalid email or password", body);
+    }
+
+    [Fact]
+    public async Task Auth_PvqVerify_IsPublic()
+    {
+        HttpResponseMessage res = await _client.PostAsync("/api/admin/auth/pvq/verify",
+            Json(new { email = "x@x.com", answer = "wrong" }));
+        Assert.NotEqual(HttpStatusCode.Unauthorized, res.StatusCode);
+    }
+
+    [Fact]
+    public async Task Admin_Overview_WithCookie_Works()
+    {
+        // 1. Get a valid cookie by logging in
+        HttpResponseMessage loginResp = await _client.PostAsJsonAsync("/api/admin/auth/login", new
+        {
+            email = TestWebAppFactory.AdminEmail,
+            password = TestWebAppFactory.AdminPassword
+        });
+        Assert.Equal(HttpStatusCode.OK, loginResp.StatusCode);
+
+        // 2. Extract cookie
+        string? cookie = null;
+        if (loginResp.Headers.TryGetValues("Set-Cookie", out IEnumerable<string>? values))
+        {
+            cookie = values.FirstOrDefault(v => v.StartsWith("resourceflow_auth=", StringComparison.OrdinalIgnoreCase));
+        }
+        Assert.NotNull(cookie);
+
+        // 3. Call protected endpoint with cookie instead of header
+        var request = new HttpRequestMessage(HttpMethod.Get, "/api/admin/overview");
+        request.Headers.Add("Cookie", cookie.Split(';')[0]);
+
+        HttpResponseMessage response = await _client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+}

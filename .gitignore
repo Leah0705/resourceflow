@@ -1,0 +1,80 @@
+# Root .gitignore for the repository
+
+# Node / frontend
+node_modules/
+resourceflow-frontend/.expo/
+resourceflow-frontend/dist/
+resourceflow-frontend/web-build/
+resourceflow-cli/dist/
+
+# .NET build outputs
+**/bin/
+**/obj/
+*.dll
+*.pdb
+*.exe
+*.nuget.props
+*.nuget.g.targets
+
+# VS / Rider
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# env files
+*.env
+
+# Local secrets (never commit)
+**/appsettings.Local.json
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Docker
+**/docker-compose.override.yml
+
+# Coverage
+CoverageReport/
+coverage/
+**/coverage*.xml
+**/TestResults/
+**/coverage-report*/
+# Uploaded media files
+ResourceFlowApi/wwwroot/media/
+
+# VPS runtime files (live DB, SSL certs/keys, deploy scripts, logs)
+data/
+nginx/ssl/
+auto_update.sh
+update.log
+
+# Local SQLite dev DB + WAL/SHM sidecars. Never commit runtime DB files:
+# they change on every transaction, bloat the repo, and the -wal/-shm sidecars
+# are only valid alongside their main .db file.
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+# Local debug screenshots (page captures, before/after diffs)
+bookings-resource-*.png
+page-*.png
+docs/*
+# Track user-facing docs explicitly
+!docs/backup-restore.md
+!docs/features.md
+!docs/http-api.md
+!docs/native-app.md
+!docs/screenshots/
+
+# Python bytecode (scripts/demo_data.py)
+__pycache__/
+*.pyc

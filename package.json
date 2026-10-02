@@ -1,0 +1,29 @@
+{
+  "name": "resourceflow",
+  "version": "2.3.0",
+  "description": "A multi-location resource booking platform with capacity rules, temporary holds, a staff dashboard and audit history.",
+  "main": "index.js",
+  "scripts": {
+    "dev": "concurrently --kill-others --kill-timeout 5000 --names \"api,fe\" --prefix-colors \"cyan,magenta\" \"dotnet watch --project ResourceFlowApi\" \"npm run dev --prefix resourceflow-frontend\"",
+    "dev:native": "node scripts/dev-native.mjs",
+    "test": "node --test \"scripts/**/*.test.mjs\"",
+    "check:doc-links": "node scripts/check-doc-links.mjs",
+    "prepare": "husky"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=24.15.0"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "husky": "^9.1.7",
+    "prettier": "^3.5.1"
+  },
+  "overrides": {
+    "shell-quote": ">=1.10.0"
+  },
+  "private": true
+}

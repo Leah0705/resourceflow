@@ -1,0 +1,289 @@
+import { ActivityIndicator, Platform, View } from "react-native";
+import { useTranslation } from "react-i18next";
+import Input from "../common/Input";
+import Select, { type SelectOption } from "../common/Select";
+import Stepper from "../common/Stepper";
+import DatePicker from "../common/DatePicker";
+import TimePicker from "../common/TimePicker";
+import { ThemedText } from "../themed-text";
+import { styles } from "./BookingForm.styles";
+
+/**
+ * The individual form controls of BookingForm, so the two layouts (inline page and drawer)
+ * read as an arrangement of named fields rather than a wall of JSX. Each is presentational:
+ * value in, change out.
+ */
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <View style={styles.field}>
+      <ThemedText style={styles.label}>{label}</ThemedText>
+      {children}
+    </View>
+  );
+}
+
+/**
+ * Party size: a dropdown on web, a stepper off it. A list of numbers in a sheet is how a form
+ * control from a website reads on a phone, and a stepper driven by a mouse is worse than a
+ * dropdown — so the control follows the pointer rather than one of them following the other.
+ *
+ * @see [BookingFormFields.test.tsx](../../tests/components/booking/BookingFormFields.test.tsx)
+ * — pins the dropdown on web and the stepper off it, and the autofill hints below.
+ */
+export function GuestsField({
+  label,
+  partySize,
+  options,
+  onChange,
+}: {
+  label: string;
+  partySize: number;
+  options: SelectOption[];
+  onChange: (partySize: number) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <Field label={label}>
+      {Platform.OS === "web" ? (
+        <Select
+          icon="people-outline"
+          accessibilityLabel={t("booking.form.guestsSelectLabel")}
+          selectedValue={partySize}
+          onSelect={(v) => onChange(v as number)}
+          options={options}
+        />
+      ) : (
+        <Stepper
+          options={options}
+          value={partySize}
+          onChange={(v) => onChange(v as number)}
+          accessibilityLabel={t("booking.form.guestsSelectLabel")}
+          decrementLabel={t("booking.form.fewerGuestsLabel")}
+          incrementLabel={t("booking.form.moreGuestsLabel")}
+        />
+      )}
+    </Field>
+  );
+}
+
+export function DateField({
+  date,
+  openDays,
+  walkInDays,
+  onChange,
+}: {
+  date: string;
+  /** ISO days the location is open. A closed day is not a candidate, so it is not listed. */
+  openDays?: number[];
+  /** Open days that take no online bookings. Listed but unpickable, so the reason is visible. */
+  walkInDays?: number[];
+  onChange: (date: string) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <Field label={t("booking.form.dateLabel")}>
+      {/* Customer flow: future-dates-only is intentional. Do NOT pass allowPast
+          here — only the admin New Booking modal opts in to back-dating. */}
+      <DatePicker
+        selectedDate={date}
+        onSelect={onChange}
+        openDays={openDays}
+        unavailableDays={walkInDays}
+        unavailableReason={t("booking.form.walkInsOnlyReason")}
+      />
+    </Field>
+  );
+}
+
+export function TimeField({
+  label,
+  time,
+  minTime,
+  maxTime,
+  onChange,
+}: {
+  label: string;
+  time: string;
+  minTime: string;
+  maxTime: string;
+  onChange: (time: string) => void;
+}) {
+  return (
+    <Field label={label}>
+      <TimePicker selectedTime={time} onSelect={onChange} minTime={minTime} maxTime={maxTime} />
+    </Field>
+  );
+}
+
+export function SectionField({
+  sectionId,
+  options,
+  onChange,
+}: {
+  sectionId: number;
+  options: SelectOption[];
+  onChange: (sectionId: number) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <Field label={t("booking.form.sectionLabel")}>
+      <Select
+        accessibilityLabel={t("booking.form.sectionLabel")}
+        selectedValue={sectionId}
+        onSelect={(val) => onChange(val as number)}
+        options={options}
+        placeholder={t("booking.form.selectSectionPlaceholder")}
+      />
+    </Field>
+  );
+}
+
+export function ResourceField({
+  isAutoAssign,
+  /** Set once a hold resolves to a concrete resource, which sharpens the auto-assign copy. */
+  resolvedResourceId,
+  options,
+  selectedValue,
+  partySize,
+  mutedColor,
+  onChange,
+}: {
+  isAutoAssign: boolean;
+  resolvedResourceId?: number | null;
+  options: SelectOption[];
+  selectedValue: number | undefined;
+  partySize: number;
+  mutedColor: string;
+  onChange: (value: number) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <Field label={t("booking.form.resourceLabel")}>
+      {isAutoAssign ? (
+        <ThemedText style={[styles.autoAssignHint, { color: mutedColor }]}>
+          {resolvedResourceId
+            ? t("booking.form.autoAssignHint")
+            : t("booking.form.autoAssignHintAllSections")}
+        </ThemedText>
+      ) : options.length === 0 ? (
+        <ThemedText style={[styles.noResources, { color: mutedColor }]}>
+          {t("booking.form.noResourcesAvailable", { count: partySize })}
+        </ThemedText>
+      ) : (
+        <Select
+          accessibilityLabel={t("booking.form.resourceLabel")}
+          selectedValue={selectedValue}
+          onSelect={(val) => onChange(val as number)}
+          options={options}
+          placeholder={t("booking.form.selectResourcePlaceholder")}
+        />
+      )}
+    </Field>
+  );
+}
+
+export function NameField({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <Field label={t("booking.form.fullNameLabel")}>
+      <Input
+        placeholder={t("booking.form.fullNamePlaceholder")}
+        accessibilityLabel={t("booking.form.fullNameAccessibilityLabel")}
+        value={value}
+        onChangeText={onChange}
+        autoCapitalize="words"
+        textContentType="name"
+        autoComplete="name"
+        returnKeyType="next"
+        blurOnSubmit={false}
+      />
+    </Field>
+  );
+}
+
+export function EmailField({
+  label,
+  value,
+  onChange,
+}: {
+  label?: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <Field label={label ?? t("booking.form.emailLabel")}>
+      <Input
+        placeholder={t("booking.form.emailPlaceholder")}
+        accessibilityLabel={t("booking.form.emailAccessibilityLabel")}
+        value={value}
+        onChangeText={onChange}
+        keyboardType="email-address"
+        autoCapitalize="none"
+        textContentType="emailAddress"
+        autoComplete="email"
+        returnKeyType="next"
+        blurOnSubmit={false}
+      />
+    </Field>
+  );
+}
+
+export function RequestsField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <Field label={label}>
+      <Input
+        placeholder={t("booking.form.requestsPlaceholder")}
+        accessibilityLabel={t("booking.form.requestsAccessibilityLabel")}
+        value={value}
+        onChangeText={onChange}
+        multiline
+        numberOfLines={3}
+        style={styles.textarea}
+      />
+    </Field>
+  );
+}
+
+/** Drawer-only group heading, with a spinner while the times underneath are refreshing. */
+export function SectionHeading({
+  label,
+  busy = false,
+  mutedColor,
+  primaryColor,
+}: {
+  label: string;
+  busy?: boolean;
+  mutedColor: string;
+  primaryColor: string;
+}) {
+  const { t } = useTranslation();
+  return (
+    <View style={styles.sectionHeadingRow}>
+      <ThemedText style={[styles.sectionHeading, { color: mutedColor }]}>{label}</ThemedText>
+      {busy && (
+        <ActivityIndicator
+          size="small"
+          color={primaryColor}
+          accessibilityLabel={t("booking.form.loadingTimesLabel")}
+        />
+      )}
+    </View>
+  );
+}

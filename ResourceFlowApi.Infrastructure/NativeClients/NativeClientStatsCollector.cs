@@ -1,0 +1,67 @@
+using System.Collections.Concurrent;
+using CustomAccessibility.Attributes;
+using ResourceFlowApi.Core.Application.DTOs;
+using ResourceFlowApi.Core.Application.Interfaces;
+
+namespace ResourceFlowApi.Infrastructure.NativeClients;
+
+/// <summary>
+/// Counts native-client requests in memory so the pipeline never writes to SQLite per request —
+/// the same reason <c>HoldService</c> is a singleton dictionary. A tally is an immutable value
+/// swapped in by <see cref="ConcurrentDictionary{TKey,TValue}.AddOrUpdate(TKey, Func{TKey,TValue}, Func{TKey,TValue,TValue})"/>,
+/// which retries its update factory under contention: mutating a shared counter object there
+/// would double-apply the retry.
+/// <para>
+/// A restart between flushes loses at most the current minute of counts, which is why this
+/// holds counters and nothing a report depends on being exact.
+/// </para>
+/// </summary>
+/// <seealso>NativeClientStatsCollectorTests.Record_AccumulatesRequestsPerPlatformVersionAndDay</seealso>
+/// <seealso>NativeClientStatsCollectorTests.Record_KeepsTheLatestSighting</seealso>
+/// <seealso>NativeClientStatsCollectorTests.Drain_EmptiesTheCollector</seealso>
+/// <seealso>NativeClientStatsCollectorTests.Record_CountsEveryRequestUnderConcurrency</seealso>
+/// <seealso>NativeClientStatsCollectorTests.Record_StopsOpeningBucketsAtTheCap</seealso>
+[OnlyAccessibleBy("ResourceFlowApi.Extensions.ServiceCollectionExtensions")]
+[OnlyAccessibleBy("ResourceFlowApi.Tests.Infrastructure.NativeClientStatsCollectorTests")]
+[OnlyAccessibleBy("ResourceFlowApi.Tests.Infrastructure.NativeClientStatsWorkerTests")]
+[ExternalAccessAllowed]
+internal sealed class NativeClientStatsCollector : INativeClientStatsCollector
+{
+    private sealed record Bucket(string Platform, string AppVersion, DateOnly Day);
+
+    private sealed record Tally(int RequestCount, DateTime LastSeenUtc);
+
+    /// <summary>
+    /// How many distinct buckets a flush window may open. The header is unauthenticated and
+    /// every well-formed version string is a new key, so without a ceiling one client could
+    /// grow this dictionary — and, a minute later, the resource — without bound. Real deployments
+    /// see a handful of versions; past the cap a new one is dropped and known ones still count.
+    /// </summary>
+    public const int MaxBuckets = 256;
+
+    private ConcurrentDictionary<Bucket, Tally> _tallies = new();
+
+    public void Record(string platform, string appVersion, DateTime nowUtc)
+    {
+        var bucket = new Bucket(platform, appVersion, DateOnly.FromDateTime(nowUtc));
+        if (_tallies.Count >= MaxBuckets && !_tallies.ContainsKey(bucket)) return;
+
+        _tallies.AddOrUpdate(
+            bucket,
+            _ => new Tally(1, nowUtc),
+            (_, tally) => new Tally(
+                tally.RequestCount + 1,
+                nowUtc > tally.LastSeenUtc ? nowUtc : tally.LastSeenUtc));
+    }
+
+    public IReadOnlyList<NativeClientObservation> Drain()
+    {
+        ConcurrentDictionary<Bucket, Tally> drained = Interlocked.Exchange(ref _tallies, new ConcurrentDictionary<Bucket, Tally>());
+        return [.. drained.Select(entry => new NativeClientObservation(
+            entry.Key.Platform,
+            entry.Key.AppVersion,
+            entry.Key.Day,
+            entry.Value.RequestCount,
+            entry.Value.LastSeenUtc))];
+    }
+}

@@ -1,0 +1,4 @@
+services:
+  backend:
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Testing

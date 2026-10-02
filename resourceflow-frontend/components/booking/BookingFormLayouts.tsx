@@ -1,0 +1,249 @@
+import type { ReactNode } from "react";
+import { Pressable, View } from "react-native";
+import { useTranslation } from "react-i18next";
+import { haptics } from "@/utils/haptics";
+import { ThemedText } from "../themed-text";
+import { Icon } from "@/components/common/Icon";
+import WalkInDaysBanner from "./WalkInDaysBanner";
+import { SectionHeading } from "./BookingFormFields";
+import type { VenueDto } from "@/api/venues";
+import { styles } from "./BookingForm.styles";
+
+/**
+ * The pieces BookingForm builds, handed to whichever layout is rendering them. The two
+ * layouts differ only in arrangement — every part is wired up identically by the form.
+ */
+export interface BookingFormParts {
+  guestsField: (label?: string) => ReactNode;
+  dateField: ReactNode;
+  timePickerField: (label?: string) => ReactNode;
+  sectionField: ReactNode;
+  resourceField: ReactNode;
+  nameField: ReactNode;
+  emailField: ReactNode;
+  requestsField: (label: string) => ReactNode;
+  /** The times picker, or the closed-day / walk-in-day notice standing in for it. */
+  timesContent: ReactNode;
+  timesBlock: (label: string) => ReactNode;
+  timezoneHint: ReactNode;
+  largePartyBanner: ReactNode;
+  largePartyModal: ReactNode;
+  holdBanner: ReactNode;
+  holdRequiredHint: ReactNode;
+  confirmButton: ReactNode;
+  gdprText: string;
+}
+
+interface LayoutProps {
+  venue: VenueDto;
+  parts: BookingFormParts;
+  /**
+   * The selected day takes no online bookings (closed, or walk-in only). Everything past the
+   * party/date row is left out rather than shown inert: a form the guest can fill in and a
+   * button they can press reads as bookable however clearly the notice above says otherwise.
+   */
+  bookingBlocked: boolean;
+  mutedColor: string;
+  primaryColor: string;
+  borderColor: string;
+}
+
+/**
+ * Drawer layout: one column, grouped into headed sections, with the resource controls behind
+ * a disclosure — most guests take the auto-assigned resource and never open it.
+ */
+export function BookingFormDrawerLayout({
+  venue,
+  parts,
+  bookingBlocked,
+  mutedColor,
+  primaryColor,
+  borderColor,
+  loadingAvailability,
+  placementOpen,
+  onTogglePlacement,
+}: LayoutProps & {
+  loadingAvailability: boolean;
+  placementOpen: boolean;
+  onTogglePlacement: () => void;
+}) {
+  const { t } = useTranslation();
+  const divider = <View style={[styles.divider, { backgroundColor: borderColor }]} />;
+
+  const partyAndDate = (
+    <View style={styles.drawerSection}>
+      <SectionHeading
+        label={t("booking.drawer.partyDateHeading")}
+        busy={loadingAvailability}
+        mutedColor={mutedColor}
+        primaryColor={primaryColor}
+      />
+      <View style={styles.drawerRow}>
+        <View style={styles.drawerRowHalf}>{parts.guestsField()}</View>
+        <View style={styles.drawerRowHalf}>{parts.dateField}</View>
+      </View>
+      {parts.timesContent}
+      {!bookingBlocked && (
+        <>
+          {parts.timezoneHint}
+          {parts.timePickerField(t("booking.drawer.exactTimeLabel"))}
+          {parts.largePartyBanner}
+        </>
+      )}
+    </View>
+  );
+
+  if (bookingBlocked) {
+    return (
+      <View style={styles.drawerForm}>
+        <WalkInDaysBanner venue={venue} />
+        {partyAndDate}
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.drawerForm}>
+      <WalkInDaysBanner venue={venue} />
+
+      {partyAndDate}
+
+      {divider}
+
+      <View style={styles.drawerSection}>
+        <SectionHeading
+          label={t("booking.drawer.yourDetailsHeading")}
+          mutedColor={mutedColor}
+          primaryColor={primaryColor}
+        />
+        {parts.nameField}
+        {parts.emailField}
+        {parts.requestsField(t("booking.drawer.specialRequestsLabel"))}
+      </View>
+
+      {divider}
+
+      <View style={styles.drawerSection}>
+        <Pressable
+          testID="placement-disclosure-toggle"
+          onPress={() => {
+            haptics.selection();
+            onTogglePlacement();
+          }}
+          accessibilityRole="button"
+          accessibilityState={{ expanded: placementOpen }}
+          style={styles.disclosureToggle}
+        >
+          {({ hovered, pressed }: { hovered?: boolean; pressed: boolean }) => {
+            const accent = hovered || pressed ? primaryColor : mutedColor;
+            return (
+              <>
+                <Icon name="options-outline" size="md" color={accent} />
+                <ThemedText style={[styles.disclosureText, { color: accent }]}>
+                  {t("booking.drawer.placementDisclosureLabel")}
+                </ThemedText>
+                <Icon
+                  name={placementOpen ? "chevron-up" : "chevron-down"}
+                  size="md"
+                  color={accent}
+                />
+              </>
+            );
+          }}
+        </Pressable>
+        {placementOpen && (
+          <>
+            {parts.sectionField}
+            {parts.resourceField}
+          </>
+        )}
+      </View>
+
+      {divider}
+      {parts.holdBanner}
+
+      <View style={styles.drawerFooter}>
+        <ThemedText style={[styles.gdpr, { color: mutedColor }]}>{parts.gdprText}</ThemedText>
+        {parts.confirmButton}
+        {parts.holdRequiredHint}
+      </View>
+      {parts.largePartyModal}
+    </View>
+  );
+}
+
+/**
+ * Inline page layout: the same fields paired into rows, which collapse to a single column
+ * below the mobile breakpoint. The hold banner rides alongside the email field when there
+ * are two columns to ride in.
+ */
+export function BookingFormInlineLayout({
+  venue,
+  parts,
+  bookingBlocked,
+  mutedColor,
+  isTwoColumn,
+}: Omit<LayoutProps, "primaryColor" | "borderColor"> & { isTwoColumn: boolean }) {
+  const { t } = useTranslation();
+  const half = isTwoColumn ? styles.fieldHalf : undefined;
+  const rowStyle = isTwoColumn ? styles.fieldRow : styles.fieldRowStacked;
+
+  const partyAndDate = (
+    <View testID="booking-field-row" style={rowStyle}>
+      <View style={half}>{parts.guestsField(t("booking.form.numberOfGuestsLabel"))}</View>
+      <View style={half}>{parts.dateField}</View>
+    </View>
+  );
+
+  if (bookingBlocked) {
+    return (
+      <View style={styles.form}>
+        <WalkInDaysBanner venue={venue} />
+        {parts.timesBlock(t("booking.form.popularTimesLabel"))}
+        {partyAndDate}
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.form}>
+      <WalkInDaysBanner venue={venue} />
+      {parts.timesBlock(t("booking.form.popularTimesLabel"))}
+
+      {partyAndDate}
+
+      {parts.largePartyBanner}
+
+      <View testID="booking-field-row" style={rowStyle}>
+        <View style={half}>{parts.timePickerField()}</View>
+        <View style={half}>{parts.sectionField}</View>
+      </View>
+
+      {parts.timezoneHint}
+
+      <View testID="booking-field-row" style={rowStyle}>
+        <View style={half}>{parts.resourceField}</View>
+        <View style={half}>{parts.nameField}</View>
+      </View>
+
+      <View
+        testID="booking-field-row"
+        style={isTwoColumn ? [styles.fieldRow, styles.fieldRowStretch] : styles.fieldRowStacked}
+      >
+        <View style={[styles.field, half]}>
+          {parts.emailField}
+          {isTwoColumn && <View style={styles.holdPush}>{parts.holdBanner}</View>}
+        </View>
+        <View style={half}>{parts.requestsField(t("booking.form.specialRequestsLabel"))}</View>
+      </View>
+
+      {!isTwoColumn && parts.holdBanner}
+
+      <ThemedText style={[styles.gdpr, { color: mutedColor }]}>{parts.gdprText}</ThemedText>
+
+      {parts.confirmButton}
+      {parts.holdRequiredHint}
+      {parts.largePartyModal}
+    </View>
+  );
+}

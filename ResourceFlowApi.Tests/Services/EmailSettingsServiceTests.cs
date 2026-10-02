@@ -1,0 +1,190 @@
+using Microsoft.EntityFrameworkCore;
+using Moq;
+using ResourceFlowApi.Core.Application.Interfaces;
+using ResourceFlowApi.Core.Application.Services;
+using ResourceFlowApi.Core.Domain;
+using ResourceFlowApi.Infrastructure.Persistence;
+using ResourceFlowApi.Infrastructure.Persistence.Repositories;
+
+namespace ResourceFlowApi.Tests.Services;
+
+public class EmailSettingsServiceTests
+{
+    private static EmailSettingsService CreateService(AppDbContext db, Mock<ICredentialProtector>? protectorMock = null, Mock<IEmailService>? emailMock = null)
+    {
+        protectorMock ??= new Mock<ICredentialProtector>();
+        emailMock ??= new Mock<IEmailService>();
+        return new EmailSettingsService(
+            new EmailSettingsRepository(db),
+            new EmailFailureRepository(db),
+            protectorMock.Object,
+            emailMock.Object);
+    }
+
+    [Fact]
+    public async Task GetAsync_ReturnsNull_WhenNoSettings()
+    {
+        using AppDbContext db = TestDbFactory.Create(nameof(GetAsync_ReturnsNull_WhenNoSettings));
+        var svc = CreateService(db);
+        Assert.Null(await svc.GetAsync());
+    }
+
+    [Fact]
+    public async Task GetAsync_ReturnsExistingSettings()
+    {
+        using AppDbContext db = TestDbFactory.Create(nameof(GetAsync_ReturnsExistingSettings));
+        db.Set<EmailSettings>().Add(new EmailSettings { Host = "smtp.example.com", Port = 587 });
+        await db.SaveChangesAsync();
+
+        var svc = CreateService(db);
+        EmailSettings? result = await svc.GetAsync();
+        Assert.NotNull(result);
+        Assert.Equal("smtp.example.com", result.Host);
+    }
+
+    [Fact]
+    public async Task SaveAsync_CreatesNewSettings_WhenNoneExist()
+    {
+        using AppDbContext db = TestDbFactory.Create(nameof(SaveAsync_CreatesNewSettings_WhenNoneExist));
+        var svc = CreateService(db);
+        await svc.SaveAsync("smtp.test.com", 465, "user@test.com", null, true, null, null);
+
+        EmailSettings? result = await db.Set<EmailSettings>().FirstOrDefaultAsync();
+        Assert.NotNull(result);
+        Assert.Equal("smtp.test.com", result.Host);
+        Assert.Equal(465, result.Port);
+        Assert.Equal("user@test.com", result.Username);
+        Assert.True(result.EnableSsl);
+    }
+
+    [Fact]
+    public async Task SaveAsync_UpdatesExistingSettings()
+    {
+        using AppDbContext db = TestDbFactory.Create(nameof(SaveAsync_UpdatesExistingSettings));
+        db.Set<EmailSettings>().Add(new EmailSettings { Host = "old.host", Port = 587 });
+        await db.SaveChangesAsync();
+
+        var svc = CreateService(db);
+        await svc.SaveAsync("new.host", 465, "new@user.com", null, false, null, null);
+
+        EmailSettings? result = await db.Set<EmailSettings>().FirstOrDefaultAsync();
+        Assert.Equal("new.host", result!.Host);
+        Assert.Equal(465, result.Port);
+        Assert.False(result.EnableSsl);
+    }
+
+    [Fact]
+    public async Task SaveAsync_EncryptsPassword_WhenProvided()
+    {
+        using AppDbContext db = TestDbFactory.Create(nameof(SaveAsync_EncryptsPassword_WhenProvided));
+        var protectorMock = new Mock<ICredentialProtector>();
+        protectorMock.Setup(p => p.Encrypt("secret")).Returns("encrypted-secret");
+
+        var svc = CreateService(db, protectorMock);
+        await svc.SaveAsync("smtp.test.com", 587, "user", "secret", true, null, null);
+
+        EmailSettings? result = await db.Set<EmailSettings>().FirstOrDefaultAsync();
+        Assert.Equal("encrypted-secret", result!.EncryptedPassword);
+        protectorMock.Verify(p => p.Encrypt("secret"), Times.Once);
+    }
+
+    [Fact]
+    public async Task SaveAsync_SkipsEncryption_WhenPasswordIsMask()
+    {
+        using AppDbContext db = TestDbFactory.Create(nameof(SaveAsync_SkipsEncryption_WhenPasswordIsMask));
+        db.Set<EmailSettings>().Add(new EmailSettings { Host = "smtp", Port = 587, EncryptedPassword = "existing-encrypted" });
+        await db.SaveChangesAsync();
+
+        var protectorMock = new Mock<ICredentialProtector>();
+        var svc = CreateService(db, protectorMock);
+        await svc.SaveAsync("smtp", 587, "user", "••••••••", true, null, null);
+
+        protectorMock.Verify(p => p.Encrypt(It.IsAny<string>()), Times.Never);
+        EmailSettings? result = await db.Set<EmailSettings>().FirstOrDefaultAsync();
+        Assert.Equal("existing-encrypted", result!.EncryptedPassword);
+    }
+
+    [Fact]
+    public async Task SaveAsync_SkipsEncryption_WhenPasswordIsNull()
+    {
+        using AppDbContext db = TestDbFactory.Create(nameof(SaveAsync_SkipsEncryption_WhenPasswordIsNull));
+        var protectorMock = new Mock<ICredentialProtector>();
+        var svc = CreateService(db, protectorMock);
+        await svc.SaveAsync("smtp.test.com", 587, "user", null, true, null, null);
+
+        protectorMock.Verify(p => p.Encrypt(It.IsAny<string>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task SaveAsync_PersistsFromNameAndFromEmail()
+    {
+        using AppDbContext db = TestDbFactory.Create(nameof(SaveAsync_PersistsFromNameAndFromEmail));
+        var svc = CreateService(db);
+        await svc.SaveAsync("smtp.test.com", 587, "user", null, true, "My Venue", "no-reply@myrestaurant.com");
+
+        EmailSettings? result = await db.Set<EmailSettings>().FirstOrDefaultAsync();
+        Assert.Equal("My Venue", result!.FromName);
+        Assert.Equal("no-reply@myrestaurant.com", result.FromEmail);
+    }
+
+    [Fact]
+    public async Task SaveAsync_SetsSendBookingConfirmations()
+    {
+        using AppDbContext db = TestDbFactory.Create(nameof(SaveAsync_SetsSendBookingConfirmations));
+        var svc = CreateService(db);
+        await svc.SaveAsync("smtp.test.com", 587, "user", null, true, null, null, sendBookingConfirmations: true);
+
+        EmailSettings? result = await db.Set<EmailSettings>().FirstOrDefaultAsync();
+        Assert.True(result!.SendBookingConfirmations);
+    }
+
+    [Fact]
+    public async Task TestConnectionAsync_ReturnsTrue_WhenServiceSucceeds()
+    {
+        using AppDbContext db = TestDbFactory.Create(nameof(TestConnectionAsync_ReturnsTrue_WhenServiceSucceeds));
+        var emailMock = new Mock<IEmailService>();
+        emailMock.Setup(e => e.TestConnectionAsync()).ReturnsAsync(true);
+
+        var svc = CreateService(db, emailMock: emailMock);
+        Assert.True(await svc.TestConnectionAsync());
+    }
+
+    [Fact]
+    public async Task TestConnectionAsync_ReturnsFalse_WhenServiceFails()
+    {
+        using AppDbContext db = TestDbFactory.Create(nameof(TestConnectionAsync_ReturnsFalse_WhenServiceFails));
+        var emailMock = new Mock<IEmailService>();
+        emailMock.Setup(e => e.TestConnectionAsync()).ReturnsAsync(false);
+
+        var svc = CreateService(db, emailMock: emailMock);
+        Assert.False(await svc.TestConnectionAsync());
+    }
+
+    [Fact]
+    public async Task GetFailuresAsync_ReturnsMostRecentFirst()
+    {
+        using AppDbContext db = TestDbFactory.Create(nameof(GetFailuresAsync_ReturnsMostRecentFirst));
+        DateTime now = DateTime.UtcNow;
+        db.Set<EmailFailure>().Add(new EmailFailure { BookingRef = "OLD", RecipientEmail = "a@a.com", ErrorMessage = "err1", AttemptedAt = now.AddMinutes(-10) });
+        db.Set<EmailFailure>().Add(new EmailFailure { BookingRef = "NEW", RecipientEmail = "b@b.com", ErrorMessage = "err2", AttemptedAt = now });
+        await db.SaveChangesAsync();
+
+        var svc = CreateService(db);
+        IReadOnlyList<EmailFailure> failures = await svc.GetFailuresAsync();
+
+        Assert.Equal(2, failures.Count);
+        Assert.Equal("NEW", failures[0].BookingRef);
+        Assert.Equal("OLD", failures[1].BookingRef);
+    }
+
+    [Fact]
+    public async Task GetFailuresAsync_ReturnsEmpty_WhenNoneRecorded()
+    {
+        using AppDbContext db = TestDbFactory.Create(nameof(GetFailuresAsync_ReturnsEmpty_WhenNoneRecorded));
+        var svc = CreateService(db);
+
+        IReadOnlyList<EmailFailure> failures = await svc.GetFailuresAsync();
+
+        Assert.Empty(failures);
+    }
+}

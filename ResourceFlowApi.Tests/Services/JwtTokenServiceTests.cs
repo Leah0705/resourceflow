@@ -1,0 +1,144 @@
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
+using Microsoft.Extensions.Configuration;
+using Microsoft.IdentityModel.Tokens;
+using ResourceFlowApi.Core.Application.Services;
+using ResourceFlowApi.Core.Application.Utilities;
+
+namespace ResourceFlowApi.Tests.Services;
+
+public class JwtTokenServiceTests
+{
+    // 32+ char test key (HS256 minimum).
+    private const string TestKey = "test-key-must-be-at-least-32-characters-long-for-hs256!!";
+    private const string TestIssuer = "resourceflow-tests";
+    private const string TestAudience = "resourceflow-tests";
+
+    private static IConfiguration BuildConfig(string? key = TestKey) =>
+        new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Jwt:Key"] = key,
+                ["Jwt:Issuer"] = TestIssuer,
+                ["Jwt:Audience"] = TestAudience,
+            })
+            .Build();
+
+    private static JwtSecurityToken Decode(string token)
+        => new JwtSecurityTokenHandler().ReadJwtToken(token);
+
+    // ── Generate ────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void Generate_Returns_NonNull_NonEmpty_Token()
+    {
+        var svc = new JwtTokenService(BuildConfig());
+
+        string token = svc.Generate(7, "admin@example.com", UserRoles.Manager);
+
+        Assert.False(string.IsNullOrWhiteSpace(token));
+    }
+
+    [Fact]
+    public void Generate_Signs_With_Hs256()
+    {
+        var svc = new JwtTokenService(BuildConfig());
+
+        JwtSecurityToken jwt = Decode(svc.Generate(7, "admin@example.com", UserRoles.Manager));
+
+        Assert.Equal("HS256", jwt.SignatureAlgorithm);
+    }
+
+    [Fact]
+    public void Generate_Sets_Subject_Email_And_Role_Claims()
+    {
+        var svc = new JwtTokenService(BuildConfig());
+
+        JwtSecurityToken jwt = Decode(svc.Generate(42, "boss@resourceflow.example", UserRoles.Owner));
+
+        Claim subject = Assert.Single(jwt.Claims, c => c.Type == JwtRegisteredClaimNames.Sub);
+        Assert.Equal("42", subject.Value);
+        Claim email = Assert.Single(jwt.Claims, c => c.Type == ClaimTypes.Email);
+        Assert.Equal("boss@resourceflow.example", email.Value);
+        Claim role = Assert.Single(jwt.Claims, c => c.Type == ClaimTypes.Role);
+        Assert.Equal(UserRoles.Owner, role.Value);
+    }
+
+    [Fact]
+    public void Generate_Carries_The_Users_Own_Role_Not_A_Hardcoded_One()
+    {
+        var svc = new JwtTokenService(BuildConfig());
+
+        JwtSecurityToken jwt = Decode(svc.Generate(3, "manager@resourceflow.example", UserRoles.Manager));
+
+        Claim role = Assert.Single(jwt.Claims, c => c.Type == ClaimTypes.Role);
+        Assert.Equal(UserRoles.Manager, role.Value);
+    }
+
+    [Fact]
+    public void Generate_Sets_30_Day_Expiry()
+    {
+        var svc = new JwtTokenService(BuildConfig());
+        DateTime before = DateTime.UtcNow;
+
+        JwtSecurityToken jwt = Decode(svc.Generate(7, "admin@example.com", UserRoles.Manager));
+
+        // Allow 5-second skew; assert it's ~30 days from now, not unbounded.
+        Assert.InRange(jwt.ValidTo, before.AddDays(30).AddSeconds(-5), before.AddDays(30).AddSeconds(5));
+    }
+
+    [Fact]
+    public void Generate_Sets_Issuer_And_Audience_From_Config()
+    {
+        var svc = new JwtTokenService(BuildConfig());
+
+        JwtSecurityToken jwt = Decode(svc.Generate(7, "admin@example.com", UserRoles.Manager));
+
+        Assert.Equal(TestIssuer, jwt.Issuer);
+        Assert.Contains(TestAudience, jwt.Audiences);
+    }
+
+    // ── Config / env fallback ───────────────────────────────────────────────────
+
+    [Fact]
+    public void Generate_Falls_Back_To_Jwt_Key_Env_Var_When_Config_Missing()
+    {
+        string? prev = Environment.GetEnvironmentVariable("JWT_KEY");
+        try
+        {
+            Environment.SetEnvironmentVariable("JWT_KEY", TestKey);
+            // Config has no Jwt:Key — env fallback must kick in.
+            var svc = new JwtTokenService(BuildConfig(key: null));
+
+            string token = svc.Generate(7, "admin@example.com", UserRoles.Manager);
+
+            Assert.False(string.IsNullOrWhiteSpace(token));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("JWT_KEY", prev);
+        }
+    }
+
+    [Fact]
+    public void Generate_Produces_Verifiable_Signature_Under_Config_Key()
+    {
+        IConfiguration cfg = BuildConfig();
+        var svc = new JwtTokenService(cfg);
+
+        string token = svc.Generate(7, "admin@example.com", UserRoles.Manager);
+
+        var validation = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidIssuer = TestIssuer,
+            ValidateAudience = true,
+            ValidAudience = TestAudience,
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = new SymmetricSecurityKey(System.Text.Encoding.UTF8.GetBytes(TestKey)),
+            ValidateLifetime = false, // we don't check NotBefore/Expires skew here
+        };
+        new JwtSecurityTokenHandler().ValidateToken(token, validation, out _);
+        // No exception thrown ⇒ signature + issuer + audience are all valid under the config key.
+    }
+}

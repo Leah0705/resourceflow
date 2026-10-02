@@ -1,0 +1,247 @@
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
+using ResourceFlowApi.Core.Application.DTOs;
+using ResourceFlowApi.Core.Application.Services;
+using ResourceFlowApi.Core.Application.Utilities;
+using ResourceFlowApi.Extensions;
+using ResourceFlowApi.Infrastructure.Auth;
+using ResourceFlowApi.Infrastructure.Cookies;
+
+namespace ResourceFlowApi.Controllers
+{
+    [ApiController]
+    [Route("api/[controller]")]
+    [EnableRateLimiting("public")]
+    public class BookingsController(
+        BookingService bookingService,
+        RecentBookingsCookie recentCookie,
+        GuestReminderService reminders,
+        WalletPassService wallet) : ControllerBase
+    {
+        private const string PkpassContentType = "application/vnd.apple.pkpass";
+
+        private readonly BookingService _bookingService = bookingService;
+        private readonly RecentBookingsCookie _recentCookie = recentCookie;
+        private readonly GuestReminderService _reminders = reminders;
+        private readonly WalletPassService _wallet = wallet;
+
+        [HttpGet("/api/venues/{venueId}/bookings")]
+        [Authorize(Policy = AuthPolicies.RequireAdmin)]
+        [RequiresScope(ApiKeyScopes.Bookings, ApiKeyScopes.Read)]
+        public async Task<IActionResult> GetBookings(int venueId)
+        {
+            IEnumerable<BookingDto> bookings = await _bookingService.GetBookingsByVenueAsync(venueId);
+            return Ok(bookings);
+        }
+
+        [HttpGet("{id}")]
+        [Authorize(Policy = AuthPolicies.RequireAdmin)]
+        [RequiresScope(ApiKeyScopes.Bookings, ApiKeyScopes.Read)]
+        public async Task<IActionResult> GetBooking(int id)
+        {
+            BookingDto? booking = await _bookingService.GetBookingByIdAsync(id);
+            if (booking == null)
+            {
+                return NotFound();
+            }
+            return Ok(booking);
+        }
+
+        // A reference plus the email on the booking is the whole of a guest's identity — there is
+        // no account behind it — so this and CancelBookingByRef are the two endpoints where a
+        // guessed reference is worth guessing, and they take the tight booking-lookup ceiling
+        // rather than the controller's "public" one. The reference's own width is the defence
+        // that survives an attacker with a pool of addresses; see BookingRefGenerator.
+        //
+        // The 404 is deliberately identical for an unknown reference and for a known reference
+        // with the wrong email: telling those apart would let an attacker confirm references
+        // without knowing any email at all, turning a two-part secret into a one-part one.
+        //
+        // Plain comments, not a doc comment: a <summary> on a public action is copied into the
+        // generated OpenAPI contract, and the CLI's committed copy of it must match byte for byte.
+        // <seealso>BookingsControllerTests.GetBookingByRef_UnknownRefAndWrongEmailAreIndistinguishable</seealso>
+        // <seealso>BookingRefEndpointRateLimitTests.ByRefGuestActions_CarryTheTightLookupPolicy</seealso>
+        [HttpGet("ref/{bookingRef}")]
+        [EnableRateLimiting(ServiceCollectionExtensions.BookingLookupPolicy)]
+        public async Task<IActionResult> GetBookingByRef(string bookingRef, [FromQuery] string email)
+        {
+            if (string.IsNullOrWhiteSpace(email))
+            {
+                return BadRequest(new MessageResponse { Message = "Email is required to look up a booking.", Code = ErrorCodes.BookingLookupEmailRequired });
+            }
+
+            BookingDto? booking = await _bookingService.GetBookingByRefAsync(bookingRef);
+            if (booking == null || !string.Equals(booking.CustomerEmail, email.Trim(), StringComparison.OrdinalIgnoreCase))
+            {
+                return NotFound(new MessageResponse { Message = "No booking found matching that reference and email.", Code = ErrorCodes.BookingLookupNotFound });
+            }
+            return Ok(booking);
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> CreateBooking([FromBody] BookingDto bookingDto)
+        {
+            if (!ModelState.IsValid)
+            {
+                return BadRequest(ModelState);
+            }
+
+            // ConflictException (overlap, paused, walk-in, past, held, capacity) → 409 is mapped
+            // by GlobalExceptionHandler with a MessageResponse { Message } body, which
+            // serializes identically to the prior anonymous { message } shape.
+            BookingDto newBooking = await _bookingService.CreateBookingAsync(bookingDto);
+
+            string? venueName = await _bookingService.GetVenueNameAsync(bookingDto.VenueId);
+
+            _recentCookie.Append(Request, Response, new CachedBookingEntry(
+                BookingRef: newBooking.BookingRef ?? "",
+                Email: newBooking.CustomerEmail ?? "",
+                Date: newBooking.Date.ToString("O"),
+                PartySize: newBooking.PartySize,
+                VenueName: venueName,
+                CreatedAt: DateTime.UtcNow.ToString("O")
+            ));
+
+            return CreatedAtAction(nameof(GetBooking), new { id = newBooking.Id }, newBooking);
+        }
+
+        /// <summary>Returns the user's recent bookings from their encrypted HttpOnly cookie.</summary>
+        [HttpGet("my-recent")]
+        public IActionResult GetMyRecentBookings()
+        {
+            List<CachedBookingEntry> entries = _recentCookie.Read(Request);
+            return Ok(entries);
+        }
+
+        [HttpPut("{id}")]
+        [Authorize(Policy = AuthPolicies.RequireAdmin)]
+        [RequiresScope(ApiKeyScopes.Bookings, ApiKeyScopes.Write)]
+        public async Task<IActionResult> UpdateBooking(int id, [FromBody] BookingDto bookingDto)
+        {
+            if (id != bookingDto.Id)
+            {
+                return BadRequest();
+            }
+
+            if (!ModelState.IsValid)
+            {
+                return BadRequest(ModelState);
+            }
+
+            await _bookingService.UpdateBookingAsync(id, bookingDto);
+            return NoContent();
+        }
+
+        [HttpDelete("{id}")]
+        [Authorize(Policy = AuthPolicies.RequireAdmin)]
+        [RequiresScope(ApiKeyScopes.Bookings, ApiKeyScopes.Write)]
+        public async Task<IActionResult> DeleteBooking(int id)
+        {
+            await _bookingService.DeleteBookingAsync(id);
+            return NoContent();
+        }
+
+        // Same two-part guest secret, same identical-404, and the same tight ceiling as
+        // GetBookingByRef — see there.
+        // <seealso>BookingsControllerTests.CancelBookingByRef_UnknownRefAndWrongEmailAreIndistinguishable</seealso>
+        // <seealso>BookingRefEndpointRateLimitTests.ByRefGuestActions_CarryTheTightLookupPolicy</seealso>
+        [HttpPost("ref/{bookingRef}/cancel")]
+        [EnableRateLimiting(ServiceCollectionExtensions.BookingLookupPolicy)]
+        public async Task<IActionResult> CancelBookingByRef(string bookingRef, [FromBody] CancelBookingByRefRequest req)
+        {
+            if (string.IsNullOrWhiteSpace(req.Email))
+            {
+                return BadRequest(new MessageResponse { Message = "Email is required to cancel a booking.", Code = ErrorCodes.BookingCancelEmailRequired });
+            }
+
+            // ConflictException (past booking) → 409 is mapped by GlobalExceptionHandler;
+            // body serializes identically to the prior anonymous { message } shape.
+            bool ok = await _bookingService.CancelBookingAsync(bookingRef, req.Email);
+            if (!ok)
+            {
+                return NotFound(new MessageResponse { Message = "No booking found matching that reference and email.", Code = ErrorCodes.BookingLookupNotFound });
+            }
+            return NoContent();
+        }
+
+        // The reference-plus-email pair, the identical 404 and the tight ceiling, as on
+        // GetBookingByRef. What is stored is a push address keyed to the booking and nothing
+        // else, so it leaves with the booking.
+        // <seealso>BookingsControllerTests.SubscribeReminders_UnknownRefAndWrongEmailAreIndistinguishable</seealso>
+        // <seealso>BookingRefEndpointRateLimitTests.ByRefGuestActions_CarryTheTightLookupPolicy</seealso>
+        [HttpPost("ref/{bookingRef}/reminders")]
+        [EnableRateLimiting(ServiceCollectionExtensions.BookingLookupPolicy)]
+        public async Task<IActionResult> SubscribeReminders(string bookingRef, [FromBody] GuestReminderSubscribeRequest req)
+        {
+            if (string.IsNullOrWhiteSpace(req.Email))
+            {
+                return BadRequest(new MessageResponse { Message = "Email is required to manage reminders.", Code = ErrorCodes.BookingLookupEmailRequired });
+            }
+
+            bool ok = await _reminders.SubscribeAsync(bookingRef, req.Email, req);
+            return ok ? NoContent() : LookupNotFound();
+        }
+
+        // <seealso>BookingRefEndpointRateLimitTests.ByRefGuestActions_CarryTheTightLookupPolicy</seealso>
+        [HttpDelete("ref/{bookingRef}/reminders")]
+        [EnableRateLimiting(ServiceCollectionExtensions.BookingLookupPolicy)]
+        public async Task<IActionResult> UnsubscribeReminders(string bookingRef, [FromBody] GuestReminderUnsubscribeRequest req)
+        {
+            if (string.IsNullOrWhiteSpace(req.Email))
+            {
+                return BadRequest(new MessageResponse { Message = "Email is required to manage reminders.", Code = ErrorCodes.BookingLookupEmailRequired });
+            }
+
+            bool ok = await _reminders.UnsubscribeAsync(bookingRef, req.Email, req.Endpoint);
+            return ok ? NoContent() : LookupNotFound();
+        }
+
+        // A signed .pkpass for the booking. 404 with its own code when Apple Wallet is not
+        // configured on this server; the identical lookup 404 otherwise.
+        // <seealso>BookingsControllerTests.AppleWalletPass_UnknownRefAndWrongEmailAreIndistinguishable</seealso>
+        // <seealso>BookingRefEndpointRateLimitTests.ByRefGuestActions_CarryTheTightLookupPolicy</seealso>
+        [HttpGet("ref/{bookingRef}/wallet/apple.pkpass")]
+        [EnableRateLimiting(ServiceCollectionExtensions.BookingLookupPolicy)]
+        public async Task<IActionResult> GetAppleWalletPass(string bookingRef, [FromQuery] string email)
+        {
+            if (string.IsNullOrWhiteSpace(email))
+            {
+                return BadRequest(new MessageResponse { Message = "Email is required to look up a booking.", Code = ErrorCodes.BookingLookupEmailRequired });
+            }
+
+            byte[]? pass = await _wallet.BuildApplePassAsync(bookingRef, email);
+            if (pass == null)
+            {
+                return LookupNotFound();
+            }
+
+            Response.Headers.CacheControl = "no-store";
+            return File(pass, PkpassContentType, $"reservation-{bookingRef}.pkpass");
+        }
+
+        // <seealso>BookingsControllerTests.GoogleWalletLink_UnknownRefAndWrongEmailAreIndistinguishable</seealso>
+        // <seealso>BookingRefEndpointRateLimitTests.ByRefGuestActions_CarryTheTightLookupPolicy</seealso>
+        [HttpGet("ref/{bookingRef}/wallet/google")]
+        [EnableRateLimiting(ServiceCollectionExtensions.BookingLookupPolicy)]
+        public async Task<IActionResult> GetGoogleWalletLink(string bookingRef, [FromQuery] string email)
+        {
+            if (string.IsNullOrWhiteSpace(email))
+            {
+                return BadRequest(new MessageResponse { Message = "Email is required to look up a booking.", Code = ErrorCodes.BookingLookupEmailRequired });
+            }
+
+            string? saveUrl = await _wallet.BuildGoogleSaveUrlAsync(bookingRef, email);
+            if (saveUrl == null)
+            {
+                return LookupNotFound();
+            }
+
+            Response.Headers.CacheControl = "no-store";
+            return Ok(new GoogleWalletLinkResponse { SaveUrl = saveUrl });
+        }
+
+        private NotFoundObjectResult LookupNotFound() =>
+            NotFound(new MessageResponse { Message = "No booking found matching that reference and email.", Code = ErrorCodes.BookingLookupNotFound });
+    }
+}

@@ -1,0 +1,129 @@
+using ResourceFlowApi.Core.Application.DTOs;
+using ResourceFlowApi.Core.Application.Exceptions;
+using ResourceFlowApi.Core.Application.Interfaces;
+using ResourceFlowApi.Core.Application.Utilities;
+using ResourceFlowApi.Core.Domain;
+
+namespace ResourceFlowApi.Core.Application.Services;
+
+public class SocialLinkService(ISocialLinkRepository socialLinkRepository, IAuditScope? audit = null)
+{
+    private readonly ISocialLinkRepository _socialLinkRepository = socialLinkRepository;
+    private readonly IAuditScope _audit = audit ?? NullAuditScope.Instance;
+
+    private const int MaxLabelLength = 60;
+
+    public async Task<List<SocialLinkDto>> GetAllAsync()
+    {
+        List<SocialLink> items = await _socialLinkRepository.GetAllAsync();
+        return items.Select(ToDto).ToList();
+    }
+
+    public async Task<SocialLinkDto> CreateAsync(CreateSocialLinkRequest req)
+    {
+        ValidateAndNormalize(req.Label, req.Url, req.IconKey, out string label, out string url, out string iconKey);
+        var entity = new SocialLink
+        {
+            Label = label,
+            Url = url,
+            IconKey = iconKey,
+            SortOrder = req.SortOrder,
+        };
+        await _socialLinkRepository.AddAsync(entity);
+
+        Describe(AuditActions.SocialLinkCreate, entity, $"Added the social link \"{entity.Label}\"");
+        return ToDto(entity);
+    }
+
+    public async Task<SocialLinkDto?> UpdateAsync(int id, UpdateSocialLinkRequest req)
+    {
+        SocialLink? entity = await _socialLinkRepository.FindByIdAsync(id);
+        if (entity == null)
+        {
+            return null;
+        }
+        ValidateAndNormalize(req.Label, req.Url, req.IconKey, out string label, out string url, out string iconKey);
+        _audit.RecordChange("label", entity.Label, label);
+        _audit.RecordChange("url", entity.Url, url);
+        _audit.RecordChange("iconKey", entity.IconKey, iconKey);
+        _audit.RecordChange("sortOrder", entity.SortOrder, req.SortOrder);
+
+        entity.Label = label;
+        entity.Url = url;
+        entity.IconKey = iconKey;
+        entity.SortOrder = req.SortOrder;
+        await _socialLinkRepository.SaveChangesAsync();
+
+        Describe(AuditActions.SocialLinkUpdate, entity, $"Edited the social link \"{entity.Label}\"");
+        return ToDto(entity);
+    }
+
+    public async Task<bool> DeleteAsync(int id)
+    {
+        SocialLink? entity = await _socialLinkRepository.FindByIdAsync(id);
+        if (entity == null)
+        {
+            return false;
+        }
+        _socialLinkRepository.Remove(entity);
+        await _socialLinkRepository.SaveChangesAsync();
+
+        Describe(AuditActions.SocialLinkDelete, entity, $"Deleted the social link \"{entity.Label}\"");
+        return true;
+    }
+
+    private void Describe(string action, SocialLink entity, string summary)
+        => _audit.Describe(action, AuditTargets.SocialLink, AuditTargets.IdOf(entity.Id), entity.Label,
+            summary: summary);
+
+    private static SocialLinkDto ToDto(SocialLink s) => new()
+    {
+        Id = s.Id,
+        Label = s.Label,
+        Url = s.Url,
+        IconKey = s.IconKey,
+        SortOrder = s.SortOrder,
+    };
+
+    /// <summary>
+    /// Trims and validates the writable fields shared by create and update. Throws
+    /// <see cref="ValidationException"/> (mapped to 400 by GlobalExceptionHandler) on any bad
+    /// shape/value; on success assigns the normalized values to the out parameters.
+    /// </summary>
+    private static void ValidateAndNormalize(
+        string? rawLabel,
+        string? rawUrl,
+        string? rawIconKey,
+        out string label,
+        out string url,
+        out string iconKey)
+    {
+        label = (rawLabel ?? string.Empty).Trim();
+        if (label.Length == 0)
+        {
+            throw new ValidationException("Social link label cannot be empty.") { Code = ErrorCodes.SocialLinkLabelRequired };
+        }
+        if (label.Length > MaxLabelLength)
+        {
+            throw new ValidationException($"Social link label cannot exceed {MaxLabelLength} characters.") { Code = ErrorCodes.SocialLinkLabelTooLong, Args = new Dictionary<string, object> { ["max"] = MaxLabelLength } };
+        }
+
+        url = (rawUrl ?? string.Empty).Trim();
+        if (url.Length == 0)
+        {
+            throw new ValidationException("Social link URL cannot be empty.") { Code = ErrorCodes.SocialLinkUrlRequired };
+        }
+        if (!UrlValidator.IsValid(url, UrlValidator.WebAndContactSchemes))
+        {
+            throw new ValidationException(
+                "Social link URL must be a valid absolute URL (http, https, mailto, tel, or sms).")
+            { Code = ErrorCodes.SocialLinkUrlInvalid };
+        }
+
+        iconKey = (rawIconKey ?? string.Empty).Trim();
+        if (!IoniconsAllowList.AllIcons.Contains(iconKey))
+        {
+            throw new ValidationException("Icon key must be one of the supported icons.") { Code = ErrorCodes.IconInvalid };
+        }
+    }
+}

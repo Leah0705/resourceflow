@@ -1,0 +1,176 @@
+/**
+ * @jest-environment jsdom
+ */
+import React from "react";
+
+// Mock react-native early
+jest.mock("react-native", () => {
+  const rn = jest.requireActual("react-native");
+  rn.Platform.OS = "web";
+  rn.Platform.select = (obj: any) => obj.web;
+  return rn;
+});
+
+// Mock web APIs early
+Object.defineProperty(window, "localStorage", {
+  value: {
+    getItem: jest.fn().mockReturnValue("dark"),
+    setItem: jest.fn(),
+  },
+  writable: true,
+});
+
+Object.defineProperty(window, "matchMedia", {
+  writable: true,
+  value: jest.fn().mockImplementation((query) => ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: jest.fn(),
+    removeListener: jest.fn(),
+    addEventListener: jest.fn(),
+    removeEventListener: jest.fn(),
+    dispatchEvent: jest.fn(),
+  })),
+});
+
+Object.defineProperty(window, "navigator", {
+  value: {
+    serviceWorker: {
+      register: jest.fn().mockResolvedValue({}),
+    },
+  },
+  writable: true,
+});
+
+// Import RootLayout AFTER web API mocks
+const RootLayout = require("@/app/_layout").default;
+
+import { render, screen, waitFor } from "@testing-library/react-native";
+
+jest.mock("expo-router", () => {
+  const { View } = require("react-native");
+  const React = require("react");
+  const Stack = ({ children, screenOptions }: any) =>
+    React.createElement(View, { testID: "stack", screenOptions }, children);
+  Stack.Screen = () => null;
+  return {
+    Stack,
+    ThemeProvider: ({ value, children }: any) =>
+      React.createElement(View, { testID: "nav-theme", value }, children),
+    DarkTheme: { dark: true, colors: {}, fonts: {} },
+    DefaultTheme: { dark: false, colors: {}, fonts: {} },
+    usePathname: jest.fn().mockReturnValue("/"),
+    useSegments: jest.fn().mockReturnValue([]),
+  };
+});
+
+jest.mock("expo-status-bar", () => ({
+  StatusBar: () => null,
+}));
+
+jest.mock("@/context/BrandContext", () => ({
+  BrandProvider: ({ children }: any) => children,
+  useBrand: () => ({ appName: "Test App", primaryColor: "#000" }),
+}));
+
+jest.mock("@/context/ThemeContext", () => ({
+  AppThemeProvider: ({ children }: any) => children,
+}));
+
+jest.mock("react-native-safe-area-context", () => ({
+  SafeAreaProvider: ({ children }: any) => children,
+}));
+
+const mockScheme = { current: "light" as "light" | "dark" };
+jest.mock("@/hooks/use-color-scheme", () => ({
+  useColorScheme: () => mockScheme.current,
+}));
+
+jest.mock("react-native-reanimated", () => ({}));
+
+import { usePathname, useSegments } from "expo-router";
+
+describe("RootLayout", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockScheme.current = "light";
+    (usePathname as jest.Mock).mockReturnValue("/");
+    (useSegments as jest.Mock).mockReturnValue([]);
+  });
+
+  // React Navigation paints its own light default on the screen container, inline and
+  // below everything the app renders, where no stylesheet can reach it. In dark mode the
+  // route transition's momentary 0.88 opacity let it flash through the whole viewport.
+  it.each([
+    ["light", "#f2f3f5"],
+    ["dark", "#111214"],
+  ] as const)("backs the navigator's screens with the %s page colour", async (scheme, expected) => {
+    mockScheme.current = scheme;
+    render(<RootLayout />);
+    const stack = await screen.findByTestId("stack");
+    expect(stack.props.screenOptions.contentStyle).toEqual({ backgroundColor: expected });
+  });
+
+  // The native header is painted by React Navigation from its own theme, not the app's, so
+  // without a theme of ours every header on a device rendered the light default — a white bar
+  // above a near-black page.
+  it.each([
+    ["light", "#f2f3f5", "#ffffff"],
+    ["dark", "#111214", "#1e2022"],
+  ] as const)(
+    "hands the navigator the %s page and card colours for its own chrome",
+    async (scheme, page, card) => {
+      mockScheme.current = scheme;
+      render(<RootLayout />);
+      const theme = (await screen.findByTestId("nav-theme")).props.value;
+      expect(theme.dark).toBe(scheme === "dark");
+      expect(theme.colors.background).toBe(page);
+      expect(theme.colors.card).toBe(card);
+    }
+  );
+
+  it("renders correctly on web and sets title", async () => {
+    (useSegments as jest.Mock).mockReturnValue(["book"]);
+    render(<RootLayout />);
+    await waitFor(() => expect(screen.getByTestId("stack")).toBeTruthy());
+    expect(document.title).toContain("Reserve a Resource");
+  });
+
+  it("sets different titles for different segments", async () => {
+    const segments = ["lookup", "booking-confirmation", "venue", "unknown", "(user)"];
+    const titles = [
+      "Find My Booking",
+      "Booking Confirmed",
+      "Location Details",
+      "Unknown",
+      "Test App",
+    ];
+
+    for (let i = 0; i < segments.length; i++) {
+      (useSegments as jest.Mock).mockReturnValue([segments[i]]);
+      render(<RootLayout />);
+      if (segments[i] === "(user)") {
+        await waitFor(() => expect(document.title).toBe(titles[i]));
+      } else {
+        await waitFor(() => expect(document.title).toContain(titles[i]));
+      }
+    }
+  });
+
+  it("renders correctly on native", async () => {
+    const { Platform } = require("react-native");
+    Platform.OS = "ios";
+    render(<RootLayout />);
+    await waitFor(() => expect(screen.getByTestId("stack")).toBeTruthy());
+  });
+
+  it("falls back to matchMedia when localStorage has no saved theme preference", () => {
+    (window.localStorage.getItem as jest.Mock).mockReturnValue(null);
+    jest.resetModules();
+    require("@/app/_layout");
+    // matchMedia returns { matches: false }, so scheme = "light"
+    // document.documentElement.className is set by the module-level code
+    expect(document.documentElement.className).toBe("light");
+  });
+});

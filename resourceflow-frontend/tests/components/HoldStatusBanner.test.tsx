@@ -1,0 +1,85 @@
+import React from "react";
+import { render, screen, fireEvent } from "@testing-library/react-native";
+import HoldStatusBanner from "@/components/booking/HoldStatusBanner";
+
+jest.mock("@/hooks/use-color-scheme", () => ({
+  useColorScheme: () => "light",
+}));
+
+describe("HoldStatusBanner", () => {
+  it("returns null when hasSelection is false", () => {
+    const { toJSON } = render(
+      <HoldStatusBanner holdStatus="idle" secondsLeft={0} hasSelection={false} />
+    );
+    expect(toJSON()).toBeNull();
+  });
+
+  it("returns null for idle status with selection", () => {
+    const { toJSON } = render(
+      <HoldStatusBanner holdStatus="idle" secondsLeft={0} hasSelection={true} />
+    );
+    expect(toJSON()).toBeNull();
+  });
+
+  it("shows loading text for pending status", () => {
+    render(<HoldStatusBanner holdStatus="pending" secondsLeft={0} hasSelection={true} />);
+    expect(screen.getByText("Checking availability…")).toBeTruthy();
+  });
+
+  it("shows countdown for held status", () => {
+    render(<HoldStatusBanner holdStatus="held" secondsLeft={185} hasSelection={true} />);
+    expect(screen.getByText(/Resource held/)).toBeTruthy();
+    expect(screen.getByText(/expires in 3:05/)).toBeTruthy();
+  });
+
+  it("names the held resource when one is given", () => {
+    render(
+      <HoldStatusBanner
+        holdStatus="held"
+        secondsLeft={60}
+        hasSelection={true}
+        resourceName="Annex 4"
+      />
+    );
+    expect(screen.getByText(/Resource held: Annex 4/)).toBeTruthy();
+  });
+
+  it("shows generic unavailable message when no holdMessage is provided", () => {
+    render(<HoldStatusBanner holdStatus="unavailable" secondsLeft={0} hasSelection={true} />);
+    expect(screen.getByText(/Resource not available/)).toBeTruthy();
+  });
+
+  it("shows the backend holdMessage when provided", () => {
+    render(
+      <HoldStatusBanner
+        holdStatus="unavailable"
+        secondsLeft={0}
+        hasSelection={true}
+        holdMessage="Cannot hold a resource for a past time."
+      />
+    );
+    expect(screen.getByText(/Cannot hold a resource for a past time/)).toBeTruthy();
+    expect(screen.queryByText(/Resource not available/)).toBeNull();
+  });
+
+  it("shows expired message with refresh button", () => {
+    const onRefresh = jest.fn();
+    render(
+      <HoldStatusBanner
+        holdStatus="expired"
+        secondsLeft={0}
+        hasSelection={true}
+        onRefresh={onRefresh}
+      />
+    );
+    expect(screen.getByText(/resource hold expired/i)).toBeTruthy();
+    fireEvent.press(screen.getByText("Refresh page"));
+    expect(onRefresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows expired message without refresh button when onRefresh not provided", () => {
+    render(<HoldStatusBanner holdStatus="expired" secondsLeft={0} hasSelection={true} />);
+    expect(screen.getByText(/resource hold expired/i)).toBeTruthy();
+    expect(screen.queryByText("Refresh page")).toBeNull();
+  });
+});

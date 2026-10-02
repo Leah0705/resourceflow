@@ -1,0 +1,57 @@
+#!/bin/sh
+
+# Fail on any error
+set -e
+
+# 1. Extract nameservers and wrap IPv6 addresses in [] for Nginx compatibility
+# This handles the "invalid port in resolver" error on Railway (e.g., fd12::10 -> [fd12::10])
+# 127.0.0.11 (Docker's embedded DNS) is only a fallback for when resolv.conf names
+# none: `resolver` round-robins across every server listed rather than failing over,
+# so an unreachable entry costs a share of lookups outright. Podman publishes its DNS
+# on the gateway, not 127.0.0.11, and appending it there 502s roughly half the proxied
+# requests — enough to fail the e2e suite while the stack looks healthy.
+RESOLVERS=$(awk '/^nameserver/ {if ($2 ~ /:/) print "["$2"]"; else print $2}' /etc/resolv.conf | xargs echo)
+export RESOLVER="${RESOLVERS:-127.0.0.11}"
+
+echo "Using resolver: $RESOLVER"
+
+# 2. Set defaults for required variables
+export PORT="${PORT:-80}"
+export BACKEND_HOST="${BACKEND_HOST:-backend}"
+export BACKEND_PORT="${BACKEND_PORT:-8080}"
+export FRONTEND_HOST="${FRONTEND_HOST:-frontend}"
+export FRONTEND_PORT="${FRONTEND_PORT:-8081}"
+
+echo "Configuring Nginx on port $PORT..."
+echo "  Proxying /api/* -> http://$BACKEND_HOST:$BACKEND_PORT"
+echo "  Proxying /*      -> http://$FRONTEND_HOST:$FRONTEND_PORT"
+
+# 3. Substitute env vars in template
+envsubst '${PORT} ${BACKEND_HOST} ${BACKEND_PORT} ${FRONTEND_HOST} ${FRONTEND_PORT} ${RESOLVER}' \
+  < /tmp/default.conf.template \
+  > /etc/nginx/conf.d/default.conf
+
+# 4. Restore the client address when another proxy sits in front of this one.
+# TRUSTED_PROXIES is a comma-separated list of addresses or CIDR ranges (for example the
+# Docker network of a Caddy, Traefik or Cloudflare Tunnel container). Requests arriving
+# from those addresses have their X-Forwarded-For header honoured, so the API's per-client
+# rate limits see each visitor rather than the proxy. Left empty, the header is ignored
+# and the connecting address is the client, which is right when nginx faces the internet.
+REAL_IP_CONF=/etc/nginx/conf.d/real-ip.conf
+: > "$REAL_IP_CONF"
+if [ -n "${TRUSTED_PROXIES:-}" ]; then
+  for proxy in $(echo "$TRUSTED_PROXIES" | tr ',' ' '); do
+    echo "set_real_ip_from $proxy;" >> "$REAL_IP_CONF"
+  done
+  echo "real_ip_header X-Forwarded-For;" >> "$REAL_IP_CONF"
+  echo "real_ip_recursive on;" >> "$REAL_IP_CONF"
+  echo "  Trusting X-Forwarded-For from: $TRUSTED_PROXIES"
+fi
+
+# 5. Validate Nginx configuration
+echo "Validating Nginx configuration..."
+nginx -t
+
+# 6. Start Nginx
+echo "Starting Nginx..."
+exec nginx -g 'daemon off;'

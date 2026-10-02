@@ -1,0 +1,56 @@
+volumes:
+  media_data:
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: ResourceFlowApi/Dockerfile
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ASPNETCORE_URLS=http://+:8080
+      - PORT=8080
+      - CORS_ORIGINS=http://localhost:5062
+    env_file:
+      - ./ResourceFlowApi/.env.docker
+    volumes:
+      - media_data:/app/wwwroot/media
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8080/api/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  frontend:
+    build:
+      context: ./resourceflow-frontend
+      dockerfile: Dockerfile
+      args:
+        - EXPO_PUBLIC_API_URL=/api
+    environment:
+      - EXPO_PUBLIC_API_URL=/api
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8081/"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  reverse-proxy:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    ports:
+      - "5062:80"
+    environment:
+      - PORT=80
+      - BACKEND_HOST=backend
+      - BACKEND_PORT=8080
+      - FRONTEND_HOST=frontend
+      - FRONTEND_PORT=8081
+    volumes:
+      - media_data:/usr/share/nginx/html/media:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy

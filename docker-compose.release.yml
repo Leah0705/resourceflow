@@ -1,0 +1,119 @@
+# ResourceFlow: build and run this checkout with a production .env file.
+# docker compose -f docker-compose.release.yml up -d --build
+
+volumes:
+  db_data:
+  media_data:
+
+services:
+  backend:
+    image: resourceflow-backend:local
+    build:
+      context: .
+      dockerfile: ResourceFlowApi/Dockerfile
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - PORT=8080
+      # Set CORS_ORIGINS to your public domain, e.g. https://bookings.example.com
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost}
+      # Required: minimum 32 random characters — generate with: openssl rand -base64 48
+      - JWT_KEY=${JWT_KEY}
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@resourceflow.example}
+      # Required on first boot to seed the admin account
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - CONNECTION_STRING=Data Source=/data/resourceflow.db
+      - DATA_PROTECTION_KEYS_PATH=/data/dp-keys
+      # Optional VAPID push notifications — leave empty to disable
+      - Vapid__PublicKey=${VAPID_PUBLIC_KEY:-}
+      - Vapid__PrivateKey=${VAPID_PRIVATE_KEY:-}
+      - Vapid__Subject=${VAPID_SUBJECT:-}
+      # Optional guest booking reminders — see docs/native-app.md
+      - GuestPush__ReminderLeadHours=${GUEST_PUSH_REMINDER_LEAD_HOURS:-24,2}
+      - GuestPush__ExpoAccessToken=${EXPO_ACCESS_TOKEN:-}
+      # Optional wallet passes — mount the certificate files under ./wallet and name them here
+      - Wallet__Apple__PassTypeIdentifier=${APPLE_PASS_TYPE_ID:-}
+      - Wallet__Apple__TeamIdentifier=${APPLE_TEAM_ID:-}
+      - Wallet__Apple__CertificatePath=${APPLE_PASS_CERTIFICATE_PATH:-}
+      - Wallet__Apple__CertificatePassword=${APPLE_PASS_CERTIFICATE_PASSWORD:-}
+      - Wallet__Apple__WwdrCertificatePath=${APPLE_WWDR_CERTIFICATE_PATH:-}
+      - Wallet__Google__IssuerId=${GOOGLE_WALLET_ISSUER_ID:-}
+      - Wallet__Google__ServiceAccountKeyPath=${GOOGLE_WALLET_SERVICE_ACCOUNT_KEY_PATH:-}
+      # Optional — override the URL used in email links/images if it differs from CORS_ORIGINS
+      # - WEBSITE_URL=${WEBSITE_URL:-}
+      # Optional — default UI locale served on GET /api/brand. Valid values: en, fr, es, de.
+      # Unset or unsupported falls back to en.
+      # - RESOURCEFLOW_DEFAULT_LOCALE=${RESOURCEFLOW_DEFAULT_LOCALE:-en}
+      # Optional — where the admin's API Keys screen links out to, served on GET /api/brand.
+      # Unset destinations are hidden. Set these to this deployment's client, guide
+      # and repository. Non-http(s) values are ignored.
+      # - RESOURCEFLOW_CLI_PACKAGE_URL=${RESOURCEFLOW_CLI_PACKAGE_URL:-}
+      # - RESOURCEFLOW_API_DOCS_URL=${RESOURCEFLOW_API_DOCS_URL:-}
+      # - RESOURCEFLOW_REPOSITORY_URL=${RESOURCEFLOW_REPOSITORY_URL:-}
+      # Optional SMTP — leave empty to disable email
+      - EmailSettings__Host=${SMTP_HOST:-}
+      - EmailSettings__Port=${SMTP_PORT:-587}
+      - EmailSettings__Username=${SMTP_USERNAME:-}
+      - EmailSettings__Password=${SMTP_PASSWORD:-}
+      - EmailSettings__FromEmail=${SMTP_FROM_EMAIL:-}
+      - EmailSettings__FromName=${SMTP_FROM_NAME:-ResourceFlow}
+      - EmailSettings__EnableSsl=${SMTP_ENABLE_SSL:-true}
+    volumes:
+      - db_data:/data
+      - media_data:/app/wwwroot/media
+      # Wallet signing material (Apple .p12 + WWDR .cer, Google service-account JSON) —
+      # optional; see docs/native-app.md
+      - ./wallet:/wallet:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  frontend:
+    image: resourceflow-frontend:local
+    build:
+      context: ./resourceflow-frontend
+      dockerfile: Dockerfile
+      args:
+        EXPO_PUBLIC_API_URL: /api
+    environment:
+      - EXPO_PUBLIC_API_URL=/api
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  reverse-proxy:
+    image: resourceflow-nginx:local
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    ports:
+      # Expose on port 80 by default. Put a TLS-terminating reverse proxy (Nginx
+      # Proxy Manager, Traefik, Caddy, Cloudflare Tunnel) in front for HTTPS.
+      - "${HOST_PORT:-80}:80"
+    environment:
+      - PORT=80
+      # With a TLS proxy in front, set this to the address range it connects from (for a
+      # proxy container on the same Docker host, 172.16.0.0/12) so rate limits see real
+      # client addresses. Leave it empty when nginx is exposed directly.
+      - TRUSTED_PROXIES=${TRUSTED_PROXIES:-}
+      - BACKEND_HOST=backend
+      - BACKEND_PORT=8080
+      - FRONTEND_HOST=frontend
+      - FRONTEND_PORT=8081
+    volumes:
+      - media_data:/usr/share/nginx/html/media:ro
+      # Universal Links / App Links verification files for a native guest app you publish
+      # yourself (see docs/native-app.md). Leave the directory empty if you have no app.
+      - ./well-known:/usr/share/nginx/html/.well-known:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    restart: unless-stopped

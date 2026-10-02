@@ -1,0 +1,215 @@
+/**
+ * @jest-environment jsdom
+ */
+import React from "react";
+import { screen, waitFor } from "@testing-library/react-native";
+import AdminSettingsIndex from "@/app/admin/settings/index";
+import BrandSettingsScreen from "@/app/admin/settings/brand";
+import EmailSettingsScreen from "@/app/admin/settings/email";
+import AccountSettingsScreen from "@/app/admin/settings/account";
+import UserSettingsScreen from "@/app/admin/settings/users";
+import ApiKeysSettingsScreen from "@/app/admin/settings/api-keys";
+import NativeAppSettingsScreen from "@/app/admin/settings/native-app";
+import { renderWithProviders } from "@/tests/helpers/renderWithProviders";
+
+const mockRedirect = jest.fn();
+jest.mock("expo-router", () => {
+  const Screen = () => null;
+  Screen.displayName = "Screen";
+  const Redirect = (props: { href: string }) => {
+    mockRedirect(props.href);
+    const { Text } = require("react-native");
+    return <Text>{`redirect:${props.href}`}</Text>;
+  };
+  Redirect.displayName = "Redirect";
+  return { Stack: { Screen }, Redirect };
+});
+
+const stub = (name: string) => {
+  const Stub = () => {
+    const { Text } = require("react-native");
+    return <Text>{name}</Text>;
+  };
+  Stub.displayName = name;
+  return Stub;
+};
+
+jest.mock("@/components/admin/settings/BrandSettingsCard", () => ({
+  BrandSettingsCard: stub("BrandSettingsCard"),
+}));
+jest.mock("@/components/admin/settings/FooterSettingsCard", () => ({
+  FooterSettingsCard: stub("FooterSettingsCard"),
+}));
+jest.mock("@/components/admin/settings/HighlightsCard", () => ({
+  HighlightsCard: stub("HighlightsCard"),
+}));
+jest.mock("@/components/admin/settings/HeaderImageCard", () => ({
+  HeaderImageCard: stub("HeaderImageCard"),
+}));
+jest.mock("@/components/admin/settings/ContactSettingsCard", () => ({
+  ContactSettingsCard: stub("ContactSettingsCard"),
+}));
+jest.mock("@/components/admin/settings/BrandPreview", () => ({
+  BrandPreview: stub("BrandPreview"),
+}));
+jest.mock("@/components/admin/settings/EmailSettingsCard", () => ({
+  EmailSettingsCard: stub("EmailSettingsCard"),
+}));
+jest.mock("@/components/admin/settings/EmailDeliveryPanel", () => ({
+  EmailDeliveryPanel: stub("EmailDeliveryPanel"),
+}));
+jest.mock("@/components/admin/settings/EmailPreviewPanel", () => ({
+  EmailPreviewPanel: stub("EmailPreviewPanel"),
+}));
+// The email route owns the SMTP state both its halves share; the cards are stubbed, so the
+// route only needs the hook to exist, not to reach the API.
+jest.mock("@/hooks/use-email-settings", () => ({
+  useEmailSettings: () => ({}),
+}));
+jest.mock("@/components/admin/settings/PushNotificationsCard", () => ({
+  PushNotificationsCard: stub("PushNotificationsCard"),
+}));
+jest.mock("@/components/admin/settings/SecurityCard", () => ({
+  SecurityCard: stub("SecurityCard"),
+}));
+jest.mock("@/components/admin/settings/UsersCard", () => ({
+  UsersCard: stub("UsersCard"),
+}));
+jest.mock("@/components/admin/settings/ApiKeysCard", () => ({
+  ApiKeysCard: stub("ApiKeysCard"),
+}));
+jest.mock("@/components/admin/settings/NativeAppReadinessCard", () => ({
+  NativeAppReadinessCard: stub("NativeAppReadinessCard"),
+}));
+jest.mock("@/components/admin/settings/NativeAppClientsCard", () => ({
+  NativeAppClientsCard: stub("NativeAppClientsCard"),
+}));
+jest.mock("@/components/admin/settings/NativeAppVersionCard", () => ({
+  NativeAppVersionCard: stub("NativeAppVersionCard"),
+}));
+jest.mock("@/components/admin/settings/NativeAppSetupCard", () => ({
+  NativeAppSetupCard: stub("NativeAppSetupCard"),
+}));
+// The route owns the one request both native-app cards render from; the cards are stubbed,
+// so it only needs the hook to resolve, not to reach the API.
+const mockNativeAppStatus = jest.fn();
+jest.mock("@/hooks/use-native-app-status", () => ({
+  useNativeAppStatus: () => mockNativeAppStatus(),
+}));
+
+// The Users route gates on the signed-in role, so it needs an auth context.
+jest.mock("@/api/auth", () => ({
+  checkSession: jest.fn(),
+  logout: jest.fn(),
+}));
+
+const asRole = (role: string) =>
+  (require("@/api/auth").checkSession as jest.Mock).mockResolvedValue({
+    id: 1,
+    email: "admin@test.com",
+    displayName: null,
+    role,
+  });
+
+describe("admin settings routes", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    asRole("Owner");
+  });
+
+  it("lands the bare /admin/settings path on Brand", () => {
+    renderWithProviders(<AdminSettingsIndex />);
+    expect(mockRedirect).toHaveBeenCalledWith("/admin/settings/brand");
+  });
+
+  it("renders the brand cards", async () => {
+    renderWithProviders(<BrandSettingsScreen />);
+    await waitFor(() => {
+      expect(screen.getByText("Brand")).toBeTruthy();
+      expect(screen.getByText("BrandSettingsCard")).toBeTruthy();
+      expect(screen.getByText("HeaderImageCard")).toBeTruthy();
+      expect(screen.getByText("ContactSettingsCard")).toBeTruthy();
+      expect(screen.getByText("HighlightsCard")).toBeTruthy();
+      expect(screen.getByText("FooterSettingsCard")).toBeTruthy();
+      expect(screen.getByText("BrandPreview")).toBeTruthy();
+    });
+  });
+
+  it("renders the notification cards", async () => {
+    renderWithProviders(<EmailSettingsScreen />);
+    await waitFor(() => {
+      expect(screen.getByText("Email & Push")).toBeTruthy();
+      expect(screen.getByText("EmailSettingsCard")).toBeTruthy();
+      expect(screen.getByText("EmailDeliveryPanel")).toBeTruthy();
+      expect(screen.getByText("EmailPreviewPanel")).toBeTruthy();
+      expect(screen.getByText("PushNotificationsCard")).toBeTruthy();
+    });
+  });
+
+  it("renders the account card", async () => {
+    renderWithProviders(<AccountSettingsScreen />);
+    await waitFor(() => {
+      expect(screen.getByText("Account")).toBeTruthy();
+      expect(screen.getByText("SecurityCard")).toBeTruthy();
+    });
+  });
+
+  it("shows the users card to an Owner", async () => {
+    renderWithProviders(<UserSettingsScreen />, { withAuth: true });
+    await waitFor(() => expect(screen.getByText("UsersCard")).toBeTruthy());
+  });
+
+  it("redirects a Manager away from the users route", async () => {
+    asRole("Manager");
+    renderWithProviders(<UserSettingsScreen />, { withAuth: true });
+    await waitFor(() => expect(mockRedirect).toHaveBeenCalledWith("/admin/settings/account"));
+    expect(screen.queryByText("UsersCard")).toBeNull();
+  });
+
+  it("shows the API keys card to an Owner", async () => {
+    renderWithProviders(<ApiKeysSettingsScreen />, { withAuth: true });
+    await waitFor(() => expect(screen.getByText("ApiKeysCard")).toBeTruthy());
+  });
+
+  it("renders the native app cards from one status request", async () => {
+    mockNativeAppStatus.mockReturnValue({
+      status: {
+        serverUrl: "https://bookings.example.com",
+        checks: [],
+        minimumAppVersion: null,
+        clients: [],
+      },
+      loading: false,
+      failed: false,
+      reload: jest.fn(),
+    });
+    renderWithProviders(<NativeAppSettingsScreen />);
+    await waitFor(() => {
+      expect(screen.getByText("Native app")).toBeTruthy();
+      expect(screen.getByText("NativeAppReadinessCard")).toBeTruthy();
+      expect(screen.getByText("NativeAppClientsCard")).toBeTruthy();
+      expect(screen.getByText("NativeAppVersionCard")).toBeTruthy();
+      expect(screen.getByText("NativeAppSetupCard")).toBeTruthy();
+    });
+  });
+
+  // The setup card still has to name an address while the status is in flight, so the route
+  // must hand it an explicit null rather than reaching into a status that is not there yet.
+  it("passes a null server address while the status is still loading", async () => {
+    mockNativeAppStatus.mockReturnValue({
+      status: null,
+      loading: true,
+      failed: false,
+      reload: jest.fn(),
+    });
+    renderWithProviders(<NativeAppSettingsScreen />);
+    await waitFor(() => expect(screen.getByText("NativeAppSetupCard")).toBeTruthy());
+  });
+
+  it("redirects a Manager away from the API keys route", async () => {
+    asRole("Manager");
+    renderWithProviders(<ApiKeysSettingsScreen />, { withAuth: true });
+    await waitFor(() => expect(mockRedirect).toHaveBeenCalledWith("/admin/settings/account"));
+    expect(screen.queryByText("ApiKeysCard")).toBeNull();
+  });
+});

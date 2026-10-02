@@ -1,0 +1,171 @@
+import React from "react";
+import { fireEvent, screen } from "@testing-library/react-native";
+import WaitlistRow from "@/components/admin/waitlist/WaitlistRow";
+import type { WaitlistEntry } from "@/api/waitlist";
+import { renderWithProviders } from "@/tests/helpers/renderWithProviders";
+
+jest.mock("@/utils/haptics", () => ({
+  haptics: { selection: jest.fn(), press: jest.fn(), outcome: jest.fn() },
+}));
+
+const entry = (over: Partial<WaitlistEntry> = {}): WaitlistEntry => ({
+  id: 4,
+  number: 7,
+  name: "Ada",
+  email: null,
+  partySize: 3,
+  status: "waiting",
+  joinedAt: new Date(Date.now() - 12 * 60_000).toISOString(),
+  notifiedAt: null,
+  partiesAhead: 0,
+  estimatedWaitMinutes: 15,
+  canAssignNow: false,
+  skipsNumber: null,
+  ...over,
+});
+
+describe("WaitlistRow", () => {
+  it("shows the ticket, party and quoted wait", () => {
+    renderWithProviders(
+      <WaitlistRow entry={entry()} busy={false} isLast={false} onAction={jest.fn()} />
+    );
+
+    expect(screen.getByText("#7")).toBeTruthy();
+    expect(screen.getByText("Ada")).toBeTruthy();
+    expect(screen.getByText(/3 participants · Joined 12m ago/)).toBeTruthy();
+    expect(screen.getByText("~15 min")).toBeTruthy();
+  });
+
+  it("offers Start session only when a resource can take the party now", () => {
+    const onAction = jest.fn();
+    const first = renderWithProviders(
+      <WaitlistRow entry={entry()} busy={false} isLast={false} onAction={onAction} />
+    );
+    expect(screen.getByTestId("waitlist-assign-4")).toBeDisabled();
+    first.unmount();
+
+    renderWithProviders(
+      <WaitlistRow
+        entry={entry({ canAssignNow: true, estimatedWaitMinutes: 0 })}
+        busy={false}
+        isLast={false}
+        onAction={onAction}
+      />
+    );
+    expect(screen.getByText("Resource free now")).toBeTruthy();
+    fireEvent.press(screen.getByTestId("waitlist-assign-4"));
+    expect(onAction).toHaveBeenCalledWith("assign");
+  });
+
+  it("names the party a free resource skips instead of quoting a wait", () => {
+    renderWithProviders(
+      <WaitlistRow
+        entry={entry({ canAssignNow: true, estimatedWaitMinutes: 19, skipsNumber: 3 })}
+        busy={false}
+        isLast={false}
+        onAction={jest.fn()}
+      />
+    );
+
+    expect(screen.getByText("Free now, skips #3")).toBeTruthy();
+    expect(screen.queryByText("~19 min")).toBeNull();
+    expect(screen.getByTestId("waitlist-assign-4")).toBeEnabled();
+  });
+
+  it("calls, and offers to call again once called", () => {
+    const onAction = jest.fn();
+    const first = renderWithProviders(
+      <WaitlistRow entry={entry()} busy={false} isLast={false} onAction={onAction} />
+    );
+    fireEvent.press(screen.getByText("Call"));
+    expect(onAction).toHaveBeenCalledWith("notify");
+    first.unmount();
+
+    renderWithProviders(
+      <WaitlistRow
+        entry={entry({ status: "notified", notifiedAt: new Date().toISOString() })}
+        busy={false}
+        isLast={false}
+        onAction={onAction}
+      />
+    );
+    expect(screen.getByText("Call again")).toBeTruthy();
+    expect(screen.getByText(/Called now/)).toBeTruthy();
+  });
+
+  it("removes a party", () => {
+    const onAction = jest.fn();
+    renderWithProviders(
+      <WaitlistRow entry={entry()} busy={false} isLast={false} onAction={onAction} />
+    );
+
+    fireEvent.press(screen.getByTestId("waitlist-remove-4"));
+
+    expect(onAction).toHaveBeenCalledWith("remove");
+  });
+
+  it("disables every action while one is in flight", () => {
+    renderWithProviders(
+      <WaitlistRow entry={entry({ canAssignNow: true })} busy isLast={false} onAction={jest.fn()} />
+    );
+
+    expect(screen.getByTestId("waitlist-remove-4")).toBeDisabled();
+    expect(screen.getByTestId("waitlist-call-4")).toBeDisabled();
+    expect(screen.getByTestId("waitlist-assign-4")).toBeDisabled();
+  });
+
+  it("names the party in each action's label, by ticket when the name is hidden", () => {
+    const first = renderWithProviders(
+      <WaitlistRow entry={entry()} busy={false} isLast={false} onAction={jest.fn()} />
+    );
+    expect(screen.getByLabelText("Call Ada")).toBeTruthy();
+    expect(screen.getByLabelText("Start session for Ada")).toBeTruthy();
+    expect(screen.getByLabelText("Remove Ada")).toBeTruthy();
+    first.unmount();
+
+    renderWithProviders(
+      <WaitlistRow
+        entry={entry({ name: null, status: "notified", notifiedAt: new Date().toISOString() })}
+        busy={false}
+        isLast={false}
+        onAction={jest.fn()}
+      />
+    );
+    expect(screen.getByLabelText("Call ticket #7 again")).toBeTruthy();
+  });
+
+  it("drops the divider under the last row", () => {
+    const first = renderWithProviders(
+      <WaitlistRow entry={entry()} busy={false} isLast={false} onAction={jest.fn()} />
+    );
+    expect(screen.getByTestId("waitlist-row-4")).toHaveStyle({ borderBottomWidth: 1 });
+    first.unmount();
+
+    renderWithProviders(<WaitlistRow entry={entry()} busy={false} isLast onAction={jest.fn()} />);
+    expect(screen.getByTestId("waitlist-row-4")).not.toHaveStyle({ borderBottomWidth: 1 });
+  });
+
+  it("stands in for participant details a key may not read, and shows an email when present", () => {
+    const first = renderWithProviders(
+      <WaitlistRow
+        entry={entry({ name: null, estimatedWaitMinutes: null })}
+        busy={false}
+        isLast={false}
+        onAction={jest.fn()}
+      />
+    );
+    expect(screen.getByText("Participant details hidden")).toBeTruthy();
+    expect(screen.getByText("No resource fits")).toBeTruthy();
+    first.unmount();
+
+    renderWithProviders(
+      <WaitlistRow
+        entry={entry({ email: "ada@example.com" })}
+        busy={false}
+        isLast={false}
+        onAction={jest.fn()}
+      />
+    );
+    expect(screen.getByText(/ada@example.com/)).toBeTruthy();
+  });
+});

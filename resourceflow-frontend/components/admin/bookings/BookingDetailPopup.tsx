@@ -1,0 +1,635 @@
+import { Modal, Pressable, ScrollView, View, ActivityIndicator } from "react-native";
+import { useTranslation } from "react-i18next";
+import { scrollIntoView } from "@/utils/scrollIntoView";
+import { ThemedText } from "@/components/themed-text";
+import {
+  getAdminBooking,
+  adminDeleteBooking,
+  adminExtendBooking,
+  adminPurgeBooking,
+  sendBookingEmail,
+  adminRestoreBooking,
+  adminUpdateBookingFull,
+  adminSetBookingStatus,
+  BookingDetailDto,
+  AdminUpdateBookingRequest,
+  type BookingStatus,
+} from "@/api/admin";
+import { fetchVenues, VenueDto, SectionDto } from "@/api/venues";
+import { useEffect, useRef, useState } from "react";
+import { theme } from "@/theme/theme";
+import { useAppTheme } from "@/hooks/use-app-theme";
+import ConfirmModal from "@/components/common/ConfirmModal";
+import AlertModal from "@/components/common/AlertModal";
+
+import { bookingDetailStyles as styles } from "./booking-detail.styles";
+import { BookingDetailsCard } from "./BookingDetailsCard";
+import { EditBookingForm } from "./EditBookingForm";
+import { ExtendBookingActions } from "./ExtendBookingActions";
+import { BookingStatusActions } from "./BookingStatusActions";
+import { EmailGuestForm } from "./EmailGuestForm";
+import { composeBookingMoveNotice } from "@/utils/bookingMoveNotice";
+import { BookingActionButtons } from "./BookingActionButtons";
+import { isPast } from "./StatusBadge";
+import Button from "@/components/common/Button";
+import { Icon } from "@/components/common/Icon";
+
+/**
+ * @see [BookingDetailPopup.test.tsx](../../../tests/components/admin/bookings/BookingDetailPopup.test.tsx)
+ * — pins that the actions stay busy while a cancel is in flight and come back live for the next
+ * booking the same mounted popup is opened on.
+ */
+export function BookingDetailPopup({
+  bookingId,
+  onClose,
+  onMutated,
+  initialFocus,
+}: {
+  bookingId: number | null;
+  onClose: () => void;
+  onMutated?: () => void;
+  /** "extend" (bound to the bookings-list "e" shortcut) scrolls the extend
+   * section into view once the booking loads, distinguishing it from a plain
+   * "open" (Enter). */
+  initialFocus?: "extend";
+}) {
+  const { t } = useTranslation();
+  const [booking, setBooking] = useState<BookingDetailDto | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [extending, setExtending] = useState(false);
+  const [settingStatus, setSettingStatus] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [showPurgeConfirm, setShowPurgeConfirm] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [emailSubject, setEmailSubject] = useState("");
+  const [emailBody, setEmailBody] = useState("");
+  const [emailSending, setEmailSending] = useState(false);
+  const [emailResult, setEmailResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [moveNoticeReady, setMoveNoticeReady] = useState(false);
+  const [uncancelling, setUncancelling] = useState(false);
+  const [showUncancelConfirm, setShowUncancelConfirm] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [venues, setVenues] = useState<VenueDto[]>([]);
+  const [loadingVenues, setLoadingVenues] = useState(false);
+  const [editPartySize, setEditPartySize] = useState("1");
+  const [editEmail, setEditEmail] = useState("");
+  const [editCustomerName, setEditCustomerName] = useState("");
+  const [editSpecialRequests, setEditSpecialRequests] = useState("");
+  const [editDate, setEditDate] = useState("");
+  const [editTime, setEditTime] = useState("");
+  const [editResourceId, setEditResourceId] = useState<number | null>(null);
+  const [editSectionId, setEditSectionId] = useState<number | null>(null);
+  const [editVenueId, setEditVenueId] = useState<number | null>(null);
+  const [editLoading, setEditLoading] = useState(false);
+
+  const { colors, isDark, primaryColor: PRIMARY } = useAppTheme();
+  const borderColor = colors.border;
+  const mutedColor = colors.muted;
+
+  const scrollRef = useRef<ScrollView>(null);
+  const extendSectionRef = useRef<View>(null);
+  const emailSectionRef = useRef<View>(null);
+
+  // A form that silently fills itself in reads as a glitch. Bringing it into view is what turns
+  // the prefill into an offer the admin can act on or ignore.
+  useEffect(() => {
+    if (!moveNoticeReady) return;
+    const timer = setTimeout(
+      () => scrollIntoView(emailSectionRef, scrollRef, { block: "center" }),
+      150
+    );
+    return () => clearTimeout(timer);
+  }, [moveNoticeReady]);
+
+  useEffect(() => {
+    if (initialFocus !== "extend" || loading || editing || !booking || booking.isCancelled) return;
+    const timer = setTimeout(
+      () => scrollIntoView(extendSectionRef, scrollRef, { block: "center" }),
+      150
+    );
+    return () => clearTimeout(timer);
+    // Depend on booking?.id/isCancelled rather than the whole booking object
+    // so an in-place update (e.g. a successful extend refreshing endTime)
+    // doesn't re-trigger the scroll-into-view animation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialFocus, loading, editing, booking?.id, booking?.isCancelled]);
+
+  useEffect(() => {
+    // The popup outlives the booking it was opened for: the screens that host it keep it mounted
+    // and only swap the id. A cancel or purge closes it without clearing its own in-flight flag,
+    // so anything left set here is what the next booking opens with — a permanently disabled
+    // "Cancelling…" on a booking nothing has cancelled.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setDeleting(false);
+    setUncancelling(false);
+    setExtending(false);
+    setSettingStatus(false);
+    setErrorMessage(null);
+    if (bookingId === null) {
+      setBooking(null);
+      setEditing(false);
+      setEmailSubject("");
+      setEmailBody("");
+      setEmailResult(null);
+      setMoveNoticeReady(false);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    setBooking(null);
+    getAdminBooking(bookingId).then((b) => {
+      if (cancelled) return;
+      setBooking(b);
+      if (b) {
+        setEditPartySize(String(b.partySize));
+        setEditEmail(b.customerEmail ?? "");
+        setEditCustomerName(b.customerName ?? "");
+        setEditSpecialRequests(b.specialRequests ?? "");
+        setEditResourceId(b.resourceId);
+        setEditSectionId(b.sectionId);
+        setEditVenueId(b.venueId);
+
+        const d = new Date(b.date);
+        const year = d.getFullYear();
+        const month = String(d.getMonth() + 1).padStart(2, "0");
+        const day = String(d.getDate()).padStart(2, "0");
+        setEditDate(`${year}-${month}-${day}`);
+        setEditTime(d.toTimeString().slice(0, 5));
+      }
+      setLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [bookingId]);
+
+  useEffect(() => {
+    if (!editing || venues.length > 0) return;
+    let cancelled = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setLoadingVenues(true);
+    fetchVenues()
+      .then((data) => {
+        if (!cancelled) setVenues(data);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingVenues(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [editing, venues.length]);
+
+  const selectedVenue = venues.find((r) => r.id === editVenueId) ?? null;
+  const sections: SectionDto[] = selectedVenue?.sections ?? [];
+  const selectedSection = sections.find((s) => s.id === editSectionId);
+  const resources = selectedSection?.resources ?? [];
+
+  const handleVenueChange = (value: string | number) => {
+    const nextId = Number(value);
+    setEditVenueId(nextId);
+    const venue = venues.find((r) => r.id === nextId);
+    const firstSection = venue?.sections[0];
+    setEditSectionId(firstSection?.id ?? null);
+    setEditResourceId(firstSection?.resources[0]?.id ?? null);
+  };
+
+  const handleSectionChange = (value: string | number) => {
+    const nextId = Number(value);
+    setEditSectionId(nextId);
+    const section = sections.find((s) => s.id === nextId);
+    setEditResourceId(section?.resources[0]?.id ?? null);
+  };
+
+  const handleDeleteConfirmed = async () => {
+    if (!booking) return;
+    setShowDeleteConfirm(false);
+    setDeleting(true);
+    try {
+      await adminDeleteBooking(booking.id);
+      onMutated?.();
+      onClose();
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : t("admin.bookings.detail.failedToCancel");
+      setDeleting(false);
+      setErrorMessage(message);
+    }
+  };
+
+  const handleExtend = async (minutes: number) => {
+    if (!booking) return;
+    setExtending(true);
+    const result = await adminExtendBooking(booking.id, minutes);
+    if (result) {
+      setBooking((prev) => (prev ? { ...prev, endTime: result.endTime } : prev));
+      onMutated?.();
+    }
+    setExtending(false);
+  };
+
+  const handleSetStatus = async (status: BookingStatus) => {
+    if (!booking) return;
+    setSettingStatus(true);
+    try {
+      setBooking(await adminSetBookingStatus(booking.id, status));
+      onMutated?.();
+    } catch (err) {
+      setErrorMessage(
+        err instanceof Error ? err.message : t("admin.bookings.detail.failedToUpdate")
+      );
+    }
+    setSettingStatus(false);
+  };
+
+  const handleUncancel = async () => {
+    if (!booking) return;
+    setShowUncancelConfirm(false);
+    setUncancelling(true);
+    try {
+      await adminRestoreBooking(booking.id);
+      const updated = await getAdminBooking(booking.id);
+      setBooking(updated);
+      onMutated?.();
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : t("admin.bookings.detail.failedToRestore");
+      setErrorMessage(message);
+    }
+    setUncancelling(false);
+  };
+
+  const handleSaveEdit = async () => {
+    if (!booking) return;
+    const partySize = parseInt(editPartySize, 10);
+    if (isNaN(partySize) || partySize < 1) {
+      setErrorMessage(t("admin.bookings.detail.invalidPartySize"));
+      return;
+    }
+    if (!editDate || !editTime) {
+      setErrorMessage(t("admin.bookings.detail.dateTimeRequired"));
+      return;
+    }
+    setEditLoading(true);
+    try {
+      const currentVenue = venues.find((r) => r.id === editVenueId);
+      const currentResource = currentVenue?.sections
+        .flatMap((s) => s.resources)
+        .find((t) => t.id === editResourceId);
+
+      if (currentResource && partySize > currentResource.capacity) {
+        const confirmed = window.confirm(
+          t("booking.form.oversizeConfirm", {
+            resourceCapacity: t("booking.form.capacityCount", { count: currentResource.capacity }),
+            guests: t("booking.form.partySize", { count: partySize }),
+          })
+        );
+        if (!confirmed) {
+          setEditLoading(false);
+          return;
+        }
+      }
+
+      const dateTime = new Date(`${editDate}T${editTime}`);
+      const updateData: AdminUpdateBookingRequest = {
+        venueId: editVenueId ?? undefined,
+        sectionId: editSectionId ?? undefined,
+        resourceId: editResourceId ?? undefined,
+        date: dateTime.toISOString(),
+        partySize,
+        customerEmail: editEmail.trim() || undefined,
+        customerName: editCustomerName.trim() || undefined,
+        specialRequests: editSpecialRequests.trim() || undefined,
+      };
+
+      const movedFrom = booking.date;
+      const updated = await adminUpdateBookingFull(booking.id, updateData);
+      setBooking(updated);
+      setEditing(false);
+      onMutated?.();
+
+      // Composing the notice is the step that was missing, not sending it: the admin still reads
+      // and sends. Only offered once the write has landed, so a move the conflict check rejected
+      // never gets announced to a guest it did not happen to.
+      const notice = updated
+        ? composeBookingMoveNotice({
+            venueName: updated.venueName,
+            bookingRef: updated.bookingRef,
+            customerName: updated.customerName,
+            fromIso: movedFrom,
+            toIso: updated.date,
+            timezone: updated.timezone,
+          })
+        : null;
+      if (notice && updated?.customerEmail) {
+        setEmailSubject(notice.subject);
+        setEmailBody(notice.body);
+        setEmailResult(null);
+        setMoveNoticeReady(true);
+      }
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : t("admin.bookings.detail.failedToUpdate");
+      setErrorMessage(message);
+    }
+    setEditLoading(false);
+  };
+
+  const handleCancelEdit = () => {
+    setEditing(false);
+    if (booking) {
+      setEditPartySize(String(booking.partySize));
+      setEditEmail(booking.customerEmail ?? "");
+      setEditCustomerName(booking.customerName ?? "");
+      setEditSpecialRequests(booking.specialRequests ?? "");
+      setEditResourceId(booking.resourceId);
+      setEditSectionId(booking.sectionId);
+      setEditVenueId(booking.venueId);
+      const bookingDate = new Date(booking.date);
+      setEditDate(bookingDate.toISOString().split("T")[0]);
+      setEditTime(bookingDate.toTimeString().slice(0, 5));
+    }
+  };
+
+  const handleSendEmail = async () => {
+    if (!booking) return;
+    if (!emailSubject.trim() || !emailBody.trim()) return;
+    setEmailSending(true);
+    setEmailResult(null);
+    const result = await sendBookingEmail(booking.id, emailSubject, emailBody);
+    setEmailResult(result);
+    setEmailSending(false);
+    if (result.ok) {
+      setEmailSubject("");
+      setEmailBody("");
+      setMoveNoticeReady(false);
+    }
+  };
+
+  const venueOptions = venues.map((r) => ({ label: r.name, value: r.id }));
+  const sectionOptions = sections.map((s) => ({ label: s.name, value: s.id }));
+  const resourceOptions = resources.map((tbl) => ({
+    label: t("admin.bookings.form.resourceOptionLabel", {
+      name: tbl.name ?? t("admin.bookings.form.resourceFallbackName", { id: tbl.id }),
+      capacity: t("booking.form.capacityCount", { count: tbl.capacity }),
+    }),
+    value: tbl.id,
+  }));
+  const partySizeOptions = [...Array(10).keys()].map((i) => ({
+    label: t("booking.form.partySize", { count: i + 1 }),
+    value: i + 1,
+  }));
+
+  return (
+    <Modal transparent animationType="fade" visible={bookingId !== null} onRequestClose={onClose}>
+      <Pressable
+        style={{
+          flex: 1,
+          backgroundColor: theme.colors.overlay.light,
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+        onPress={onClose}
+        accessibilityRole="button"
+        accessibilityLabel={t("admin.bookings.detail.closeLabel")}
+      >
+        <Pressable
+          onPress={/* istanbul ignore next */ (e) => e.stopPropagation?.()}
+          role="dialog"
+          aria-modal
+          accessibilityViewIsModal
+          accessibilityLabel={t("admin.bookings.detail.dialogLabel")}
+          style={{
+            width: "92%",
+            maxWidth: 960,
+            maxHeight: "92%",
+            backgroundColor: colors.card,
+            borderRadius: 16,
+            borderWidth: 1,
+            borderColor,
+            overflow: "hidden",
+          }}
+        >
+          <View
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              justifyContent: "space-between",
+              padding: 16,
+              paddingHorizontal: 20,
+              borderBottomWidth: 1,
+              borderBottomColor: borderColor,
+              gap: 12,
+            }}
+          >
+            <ThemedText style={{ fontSize: 18, fontWeight: "700", letterSpacing: -0.3 }}>
+              {t("admin.bookings.detail.heading")}
+            </ThemedText>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+              {editing ? (
+                <>
+                  <Button
+                    variant="secondary"
+                    tone="neutral"
+                    size="md"
+                    onPress={handleCancelEdit}
+                    disabled={editLoading}
+                    accessibilityLabel={t("admin.bookings.detail.discardChangesLabel")}
+                  >
+                    {t("common.actions.cancel")}
+                  </Button>
+                  <Button
+                    size="md"
+                    onPress={handleSaveEdit}
+                    disabled={editLoading}
+                    loading={editLoading}
+                    accessibilityLabel={t("admin.bookings.detail.saveChangesLabel")}
+                  >
+                    {editLoading
+                      ? t("common.status.saving")
+                      : t("admin.bookings.detail.saveChanges")}
+                  </Button>
+                </>
+              ) : (
+                booking &&
+                !booking.isCancelled && (
+                  <Button
+                    variant="secondary"
+                    size="md"
+                    icon="create-outline"
+                    onPress={() => setEditing(true)}
+                    accessibilityLabel={t("admin.bookings.detail.editLabel")}
+                  >
+                    {t("admin.bookings.detail.edit")}
+                  </Button>
+                )
+              )}
+              <Pressable
+                onPress={onClose}
+                style={{ padding: 6 }}
+                accessibilityRole="button"
+                accessibilityLabel={t("common.actions.close")}
+                hitSlop={{ top: 11, bottom: 11, left: 11, right: 11 }}
+              >
+                <Icon name="close" size={22} color={mutedColor} />
+              </Pressable>
+            </View>
+          </View>
+
+          <ScrollView ref={scrollRef} contentContainerStyle={{ padding: 20, gap: 16 }}>
+            {loading ? (
+              <ActivityIndicator size="large" color={PRIMARY} style={{ marginVertical: 40 }} />
+            ) : !booking ? (
+              <ThemedText style={{ textAlign: "center", color: mutedColor, marginVertical: 40 }}>
+                {t("admin.bookings.detail.notFound")}
+              </ThemedText>
+            ) : (
+              <>
+                <View style={styles.twoCol}>
+                  <View style={styles.colLeft}>
+                    <BookingDetailsCard
+                      booking={booking}
+                      borderColor={borderColor}
+                      mutedColor={mutedColor}
+                      cardColor={colors.card}
+                    />
+                  </View>
+
+                  <View style={styles.colRight}>
+                    {editing ? (
+                      <EditBookingForm
+                        borderColor={borderColor}
+                        loadingVenues={loadingVenues}
+                        venueOptions={venueOptions}
+                        sectionOptions={sectionOptions}
+                        resourceOptions={resourceOptions}
+                        partySizeOptions={partySizeOptions}
+                        editVenueId={editVenueId}
+                        editSectionId={editSectionId}
+                        editResourceId={editResourceId}
+                        editPartySize={editPartySize}
+                        editEmail={editEmail}
+                        editCustomerName={editCustomerName}
+                        editSpecialRequests={editSpecialRequests}
+                        editDate={editDate}
+                        editTime={editTime}
+                        selectedVenue={selectedVenue}
+                        setEditResourceId={setEditResourceId}
+                        setEditPartySize={setEditPartySize}
+                        setEditEmail={setEditEmail}
+                        setEditCustomerName={setEditCustomerName}
+                        setEditSpecialRequests={setEditSpecialRequests}
+                        setEditDate={setEditDate}
+                        setEditTime={setEditTime}
+                        handleVenueChange={handleVenueChange}
+                        handleSectionChange={handleSectionChange}
+                      />
+                    ) : !booking.isCancelled ? (
+                      <View style={{ gap: 16 }}>
+                        <BookingStatusActions
+                          booking={booking}
+                          busy={settingStatus}
+                          onSetStatus={handleSetStatus}
+                          borderColor={borderColor}
+                          mutedColor={mutedColor}
+                          isDark={isDark}
+                        />
+                        <View ref={extendSectionRef} testID="extend-section">
+                          <ExtendBookingActions
+                            borderColor={borderColor}
+                            mutedColor={mutedColor}
+                            extending={extending}
+                            onExtend={handleExtend}
+                          />
+                        </View>
+                        <View ref={emailSectionRef} testID="email-section">
+                          <EmailGuestForm
+                            moveNoticeReady={moveNoticeReady}
+                            borderColor={borderColor}
+                            mutedColor={mutedColor}
+                            isDark={isDark}
+                            colors={colors}
+                            customerEmail={booking.customerEmail}
+                            emailSubject={emailSubject}
+                            emailBody={emailBody}
+                            emailSending={emailSending}
+                            emailResult={emailResult}
+                            setEmailSubject={setEmailSubject}
+                            setEmailBody={setEmailBody}
+                            onSendEmail={handleSendEmail}
+                          />
+                        </View>
+                      </View>
+                    ) : null}
+                  </View>
+                </View>
+
+                <BookingActionButtons
+                  isCancelled={!!booking.isCancelled}
+                  isPast={isPast(booking.date)}
+                  uncancelling={uncancelling}
+                  deleting={deleting}
+                  onUncancel={() => setShowUncancelConfirm(true)}
+                  onCancel={() => setShowDeleteConfirm(true)}
+                  onPurge={() => setShowPurgeConfirm(true)}
+                />
+              </>
+            )}
+          </ScrollView>
+        </Pressable>
+      </Pressable>
+
+      <ConfirmModal
+        visible={showDeleteConfirm}
+        title={t("admin.bookings.cancelBookingTitle")}
+        message={t("admin.bookings.detail.cancelBookingConfirmMessage")}
+        confirmLabel={t("admin.bookings.cancelBookingTitle")}
+        cancelLabel={t("admin.bookings.keep")}
+        destructive
+        onConfirm={handleDeleteConfirmed}
+        onCancel={() => setShowDeleteConfirm(false)}
+      />
+
+      <ConfirmModal
+        visible={showUncancelConfirm}
+        title={t("admin.bookings.detail.restoreBookingTitle")}
+        message={t("admin.bookings.detail.restoreBookingConfirm")}
+        confirmLabel={t("admin.bookings.detail.restore")}
+        cancelLabel={t("admin.bookings.goBack")}
+        onConfirm={handleUncancel}
+        onCancel={() => setShowUncancelConfirm(false)}
+      />
+
+      <ConfirmModal
+        visible={showPurgeConfirm}
+        title={t("admin.bookings.detail.permanentlyDeleteTitle")}
+        message={t("admin.bookings.detail.permanentlyDeleteMessage")}
+        confirmLabel={t("admin.bookings.detail.deleteForever")}
+        cancelLabel={t("admin.bookings.goBack")}
+        destructive
+        onConfirm={async () => {
+          if (!booking) return;
+          setShowPurgeConfirm(false);
+          setDeleting(true);
+          const ok = await adminPurgeBooking(booking.id);
+          if (ok) {
+            onMutated?.();
+            onClose();
+          } else {
+            setDeleting(false);
+            setErrorMessage(t("admin.bookings.detail.failedToPermanentlyDelete"));
+          }
+        }}
+        onCancel={() => setShowPurgeConfirm(false)}
+      />
+
+      <AlertModal
+        visible={!!errorMessage}
+        title={t("errors.title")}
+        message={errorMessage ?? ""}
+        onClose={() => setErrorMessage(null)}
+      />
+    </Modal>
+  );
+}

@@ -1,0 +1,847 @@
+/**
+ * @jest-environment jsdom
+ */
+import React from "react";
+import { screen, waitFor, fireEvent, act, within } from "@testing-library/react-native";
+import { KeyboardAvoidingView, Linking, Platform, ScrollView, StyleSheet } from "react-native";
+import LookupScreen from "@/components/booking/LookupScreen";
+import { BottomSheetModal } from "@gorhom/bottom-sheet";
+import { getBookingByRef, getBookingById, cancelBookingByRef } from "@/api/bookings";
+import { fetchVenueById } from "@/api/venues";
+import { fetchCachedBookings } from "@/utils/bookingCache";
+import { getWaitlistStatus } from "@/api/waitlist";
+import {
+  forgetWaitlistTicket,
+  readWaitlistTickets,
+  rememberWaitlistTicket,
+} from "@/utils/waitlistTickets";
+import { useOnline } from "@/hooks/use-online";
+import { renderWithProviders } from "@/tests/helpers/renderWithProviders";
+import { renderWithInsets } from "@/tests/helpers/renderWithInsets";
+
+jest.mock("@/components/layout/Footer", () => {
+  const { View } = require("react-native");
+  return { __esModule: true, default: () => <View testID="mock-footer" /> };
+});
+
+jest.mock("@expo/vector-icons", () => ({ Ionicons: () => null }));
+
+// The sheet variant renders inside a Modal; render its children inline so tests can reach them.
+jest.mock("react-native", () => {
+  const rn = jest.requireActual("react-native");
+  rn.Modal = ({ children, visible }: any) => (visible ? children : null);
+  return rn;
+});
+
+jest.mock("@/utils/haptics", () => ({
+  haptics: { selection: jest.fn(), press: jest.fn(), outcome: jest.fn() },
+}));
+
+jest.mock("@/api/bookings", () => ({
+  getBookingByRef: jest.fn(),
+  getBookingById: jest.fn(),
+  cancelBookingByRef: jest.fn(),
+}));
+
+jest.mock("@/api/venues", () => ({
+  fetchVenueById: jest.fn(),
+}));
+
+jest.mock("@/utils/bookingCache", () => ({
+  fetchCachedBookings: jest.fn(),
+}));
+
+jest.mock("@/hooks/use-online", () => ({ useOnline: jest.fn() }));
+
+jest.mock("@/api/waitlist", () => ({ getWaitlistStatus: jest.fn(), leaveWaitlist: jest.fn() }));
+
+jest.mock("@/utils/waitlistTickets", () => ({
+  readWaitlistTickets: jest.fn(),
+  rememberWaitlistTicket: jest.fn(),
+  forgetWaitlistTicket: jest.fn(),
+}));
+
+jest.mock("expo-router", () => ({
+  useRouter: jest.fn(() => ({ push: jest.fn() })),
+  // Runs once on mount, standing in for the screen gaining focus.
+  useFocusEffect: (effect: () => void) => require("react").useEffect(effect, [effect]),
+}));
+
+jest.mock("@/components/common/ConfirmModal", () => require("../../../jest-mocks/ConfirmModal"));
+
+jest.setTimeout(15000);
+
+/** The platform sheet's props, which is where the compact layout's behaviour is observable. */
+const sheetProps = () =>
+  screen.UNSAFE_getByType(BottomSheetModal as unknown as React.ComponentType).props as Record<
+    string,
+    // eslint-disable-next-line typescript/no-explicit-any
+    any
+  >;
+
+const mockBooking = {
+  id: 1,
+  bookingRef: "REF123",
+  customerEmail: "test@test.com",
+  venueId: 1,
+  date: "2026-10-10T12:00:00Z",
+  partySize: 2,
+  isCancelled: false,
+};
+
+const mockVenue = { id: 1, name: "Test Location", address: "123 Main St" };
+
+function setWidth(width: number) {
+  jest
+    .spyOn(require("react-native"), "useWindowDimensions")
+    .mockReturnValue({ width, height: 800 });
+}
+
+/**
+ * A scroll event carrying the full geometry RN reports. The scroll-to-top FAB reads the
+ * content/viewport pair to work out how close the footer is, so a partial event is not a
+ * scroll it can answer.
+ */
+const scrollEvent = (y: number) => ({
+  nativeEvent: {
+    contentOffset: { y },
+    contentSize: { height: 4000 },
+    layoutMeasurement: { height: 900 },
+  },
+});
+
+/** The subtitle, which the screen carries on both its routes and in both branches. */
+const IDLE_SCREEN = "Enter your booking reference and email to look up your reservation.";
+const PAGE_TITLE = "Find my booking";
+
+describe("LookupScreen", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (fetchCachedBookings as jest.Mock).mockResolvedValue([]);
+    (readWaitlistTickets as jest.Mock).mockReturnValue({});
+    (useOnline as jest.Mock).mockReturnValue(true);
+    setWidth(1024);
+  });
+
+  it("renders the idle search form with no result panel", async () => {
+    renderWithProviders(<LookupScreen />);
+    expect(screen.getByText(IDLE_SCREEN)).toBeTruthy();
+    expect(screen.queryByTestId("result-panel")).toBeNull();
+    await waitFor(() => expect(fetchCachedBookings).toHaveBeenCalled());
+  });
+
+  /**
+   * Neither of this screen's routes draws a native header, so both are tab roots
+   * whose scroll content pads the tab bar itself: inside a tab the bottom inset is the bar's
+   * height on iOS, where the page runs under it. Web has no bar and pads nothing.
+   */
+  describe("the tab bar", () => {
+    const TAB_BAR = 83;
+    const scrollPadding = () =>
+      StyleSheet.flatten(screen.UNSAFE_getAllByType(ScrollView)[0].props.contentContainerStyle)
+        .paddingBottom;
+
+    const onPlatform = async (os: string, body: () => Promise<void>) => {
+      const original = Platform.OS;
+      (Platform as unknown as { OS: string }).OS = os;
+      try {
+        await body();
+      } finally {
+        (Platform as unknown as { OS: string }).OS = original;
+      }
+    };
+
+    it("is cleared by the scroll content off web", async () => {
+      await onPlatform("ios", async () => {
+        renderWithInsets({ bottom: TAB_BAR }, <LookupScreen />);
+        await waitFor(() => expect(fetchCachedBookings).toHaveBeenCalled());
+        expect(scrollPadding()).toBe(TAB_BAR);
+      });
+    });
+
+    it("is not a thing on web", async () => {
+      await onPlatform("web", async () => {
+        renderWithInsets({ bottom: TAB_BAR }, <LookupScreen />);
+        await waitFor(() => expect(fetchCachedBookings).toHaveBeenCalled());
+        expect(scrollPadding()).toBe(0);
+      });
+    });
+  });
+
+  /**
+   * The status bar inset pads the scroll content, not the screen around it, so the form runs
+   * under the bar as it scrolls rather than stopping at a dead strip — the shape the home hero
+   * already had. Nothing pins on this screen, so nothing has to reclaim the bar.
+   */
+  describe("the status bar", () => {
+    const STATUS_BAR = 47;
+    const rootPadding = () =>
+      StyleSheet.flatten(screen.getByTestId("lookup-root").props.style).paddingTop;
+    const scrollTopPadding = () =>
+      StyleSheet.flatten(screen.UNSAFE_getAllByType(ScrollView)[0].props.contentContainerStyle)
+        .paddingTop;
+
+    it("pads the scroll content, leaving the screen itself flush to the display", async () => {
+      renderWithInsets({ top: STATUS_BAR }, <LookupScreen />);
+      await waitFor(() => expect(fetchCachedBookings).toHaveBeenCalled());
+
+      expect(rootPadding()).toBeUndefined();
+      expect(scrollTopPadding()).toBe(STATUS_BAR);
+    });
+  });
+
+  /**
+   * Booking confirmation is a state of this screen, not a page of its own, and off web
+   * neither of its two routes draws a native header — so the page names itself the same way
+   * on both, which is what it has always looked like on web under one navbar. A title that
+   * appeared on only one of them is how the confirmation started reading as its own screen.
+   */
+  describe("the page's own title", () => {
+    it("names the page on the lookup route", async () => {
+      renderWithProviders(<LookupScreen />);
+      expect(screen.getByText(PAGE_TITLE)).toBeTruthy();
+      await waitFor(() => expect(fetchCachedBookings).toHaveBeenCalled());
+    });
+
+    it("names it identically on a booking confirmation", async () => {
+      (getBookingByRef as jest.Mock).mockResolvedValue(mockBooking);
+      (fetchVenueById as jest.Mock).mockResolvedValue(mockVenue);
+
+      renderWithProviders(
+        <LookupScreen initialRef="REF123" initialEmail="test@test.com" justBooked />
+      );
+
+      await waitFor(() => expect(screen.getByText("Booking Confirmed")).toBeTruthy());
+      expect(screen.getByText(PAGE_TITLE)).toBeTruthy();
+    });
+  });
+
+  it("offers the saved address for the email field", async () => {
+    renderWithProviders(<LookupScreen />);
+    const input = screen.getByLabelText("Email address");
+    expect(input.props.textContentType).toBe("emailAddress");
+    expect(input.props.autoComplete).toBe("email");
+    await waitFor(() => expect(fetchCachedBookings).toHaveBeenCalled());
+  });
+
+  it("looks up a booking from the form and shows the result panel beside it", async () => {
+    (getBookingByRef as jest.Mock).mockResolvedValue(mockBooking);
+    (fetchVenueById as jest.Mock).mockResolvedValue(mockVenue);
+    renderWithProviders(<LookupScreen />);
+
+    fireEvent.changeText(screen.getByPlaceholderText("e.g. swift-cedar-river"), "REF123");
+    fireEvent.changeText(
+      screen.getByPlaceholderText("The email used when booking"),
+      "test@test.com"
+    );
+    fireEvent.press(screen.getByText("Look Up"));
+
+    await waitFor(() => expect(screen.getByText("Booking Found")).toBeTruthy());
+    expect(screen.getByTestId("result-panel")).toBeTruthy();
+    expect(screen.getByText("REF123")).toBeTruthy();
+    expect(screen.getByText("Test Location")).toBeTruthy();
+    // The form stays put beside the panel — a second lookup costs no navigation.
+    expect(screen.getByPlaceholderText("e.g. swift-cedar-river").props.value).toBe("REF123");
+  });
+
+  describe("contact details under the help text", () => {
+    it("renders nothing when neither the location nor the brand lists any", async () => {
+      renderWithProviders(<LookupScreen />);
+      await waitFor(() => expect(fetchCachedBookings).toHaveBeenCalled());
+      expect(screen.queryByLabelText(/^Call /)).toBeNull();
+      // Anchored on the address so this doesn't match the "Email address" input above it.
+      expect(screen.queryByLabelText(/^Email .+@/)).toBeNull();
+    });
+
+    it("offers the location's phone and email once a lookup names one", async () => {
+      (getBookingByRef as jest.Mock).mockResolvedValue(mockBooking);
+      (fetchVenueById as jest.Mock).mockResolvedValue({
+        ...mockVenue,
+        phoneNumber: "+1 555 0142",
+        emailAddress: "hi@resourceflow.example",
+      });
+      renderWithProviders(<LookupScreen initialRef="REF123" initialEmail="test@test.com" />);
+
+      await waitFor(() => expect(screen.getByText("Booking Found")).toBeTruthy());
+      expect(screen.getByLabelText("Call +1 555 0142")).toBeTruthy();
+      expect(screen.getByLabelText("Email hi@resourceflow.example")).toBeTruthy();
+    });
+
+    it("dials the phone with formatting stripped, and mailtos the email", async () => {
+      const openURL = jest.spyOn(Linking, "openURL").mockResolvedValue(undefined as never);
+      (getBookingByRef as jest.Mock).mockResolvedValue(mockBooking);
+      (fetchVenueById as jest.Mock).mockResolvedValue({
+        ...mockVenue,
+        phoneNumber: "+1 555 0142",
+        emailAddress: "hi@resourceflow.example",
+      });
+      renderWithProviders(<LookupScreen initialRef="REF123" initialEmail="test@test.com" />);
+
+      await waitFor(() => expect(screen.getByLabelText("Call +1 555 0142")).toBeTruthy());
+      fireEvent.press(screen.getByLabelText("Call +1 555 0142"));
+      expect(openURL).toHaveBeenCalledWith("tel:+15550142");
+
+      fireEvent.press(screen.getByLabelText("Email hi@resourceflow.example"));
+      expect(openURL).toHaveBeenCalledWith("mailto:hi@resourceflow.example");
+      openURL.mockRestore();
+    });
+  });
+
+  it("does not trigger a lookup when submitting the form with empty fields", async () => {
+    renderWithProviders(<LookupScreen />);
+    fireEvent(screen.getByPlaceholderText("The email used when booking"), "submitEditing");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(getBookingByRef).not.toHaveBeenCalled();
+  });
+
+  it("shows a not-found card without a retry action", async () => {
+    (getBookingByRef as jest.Mock).mockResolvedValue(null);
+    renderWithProviders(<LookupScreen />);
+
+    fireEvent.changeText(screen.getByPlaceholderText("e.g. swift-cedar-river"), "NOPE");
+    fireEvent.changeText(
+      screen.getByPlaceholderText("The email used when booking"),
+      "test@test.com"
+    );
+    fireEvent.press(screen.getByText("Look Up"));
+
+    await waitFor(() =>
+      expect(screen.getByText("No booking found matching that reference and email.")).toBeTruthy()
+    );
+    expect(screen.queryByText("Try again")).toBeNull();
+  });
+
+  it("shows an error card, distinct from not-found, with a working retry", async () => {
+    (getBookingByRef as jest.Mock)
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce(mockBooking);
+    (fetchVenueById as jest.Mock).mockResolvedValue(mockVenue);
+    renderWithProviders(<LookupScreen />);
+
+    fireEvent.changeText(screen.getByPlaceholderText("e.g. swift-cedar-river"), "REF123");
+    fireEvent.changeText(
+      screen.getByPlaceholderText("The email used when booking"),
+      "test@test.com"
+    );
+    fireEvent.press(screen.getByText("Look Up"));
+
+    await waitFor(() =>
+      expect(
+        screen.getByText("We couldn't reach the booking system. Your booking is safe.")
+      ).toBeTruthy()
+    );
+    expect(screen.queryByText("No booking found matching that reference and email.")).toBeNull();
+
+    fireEvent.press(screen.getByText("Try again"));
+    await waitFor(() => expect(screen.getByText("Booking Found")).toBeTruthy());
+    expect(getBookingByRef).toHaveBeenCalledTimes(2);
+  });
+
+  it("lifts the search form clear of the on-screen keyboard on a device", async () => {
+    renderWithProviders(<LookupScreen />);
+    await waitFor(() => expect(fetchCachedBookings).toHaveBeenCalled());
+
+    // Per-OS behaviour belongs to KeyboardAvoider's own test, which pins both branches; the
+    // screen's job is only to put the form inside the shell off web.
+    expect(screen.UNSAFE_queryAllByType(KeyboardAvoidingView)).toHaveLength(1);
+  });
+
+  it("blames the connection, not the booking system, when the lookup fails offline", async () => {
+    (useOnline as jest.Mock).mockReturnValue(false);
+    (getBookingByRef as jest.Mock).mockRejectedValue(new Error("offline"));
+    renderWithProviders(<LookupScreen />);
+
+    fireEvent.changeText(screen.getByPlaceholderText("e.g. swift-cedar-river"), "REF123");
+    fireEvent.changeText(
+      screen.getByPlaceholderText("The email used when booking"),
+      "test@test.com"
+    );
+    fireEvent.press(screen.getByText("Look Up"));
+
+    await waitFor(() =>
+      expect(screen.getByText("You're offline. Reconnect to look up your booking.")).toBeTruthy()
+    );
+    expect(
+      screen.queryByText("We couldn't reach the booking system. Your booking is safe.")
+    ).toBeNull();
+  });
+
+  describe("deep links", () => {
+    it("does nothing when only a ref is provided, with no email and no justBooked", async () => {
+      renderWithProviders(<LookupScreen initialRef="REF123" />);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(getBookingByRef).not.toHaveBeenCalled();
+      expect(screen.queryByTestId("result-panel")).toBeNull();
+    });
+
+    it("runs the lookup on mount for a ref+email deep link and prefills the form", async () => {
+      (getBookingByRef as jest.Mock).mockResolvedValue(mockBooking);
+      (fetchVenueById as jest.Mock).mockResolvedValue(mockVenue);
+      renderWithProviders(<LookupScreen initialRef="REF123" initialEmail="test@test.com" />);
+
+      await waitFor(() => expect(screen.getByText("Booking Found")).toBeTruthy());
+      expect(getBookingByRef).toHaveBeenCalledWith("REF123", "test@test.com");
+      expect(screen.getByPlaceholderText("e.g. swift-cedar-river").props.value).toBe("REF123");
+    });
+
+    it("justBooked proceeds even without an email, and shows Booking Confirmed", async () => {
+      (getBookingByRef as jest.Mock).mockResolvedValue(null);
+      (getBookingById as jest.Mock).mockResolvedValue(mockBooking);
+      renderWithProviders(<LookupScreen initialRef="50" legacyBookingId={50} justBooked />);
+
+      await waitFor(() => expect(screen.getByText("Booking Confirmed")).toBeTruthy());
+      expect(getBookingByRef).not.toHaveBeenCalled();
+      expect(getBookingById).toHaveBeenCalledWith(50);
+    });
+
+    it("fires success haptics once a justBooked deep link resolves to an active booking", async () => {
+      const { haptics } = require("@/utils/haptics");
+      (getBookingByRef as jest.Mock).mockResolvedValue(mockBooking);
+      renderWithProviders(
+        <LookupScreen initialRef="REF123" initialEmail="test@test.com" justBooked />
+      );
+
+      await waitFor(() => expect(screen.getByText("Booking Confirmed")).toBeTruthy());
+      await waitFor(() => expect(haptics.outcome).toHaveBeenCalledWith("success"));
+    });
+
+    it("fires error-tone haptics when the justBooked booking is already cancelled", async () => {
+      const { haptics } = require("@/utils/haptics");
+      (getBookingByRef as jest.Mock).mockResolvedValue({ ...mockBooking, isCancelled: true });
+      renderWithProviders(
+        <LookupScreen initialRef="REF123" initialEmail="test@test.com" justBooked />
+      );
+
+      await waitFor(() => expect(screen.getByText("Booking Cancelled")).toBeTruthy());
+      await waitFor(() => expect(haptics.outcome).toHaveBeenCalledWith("error"));
+    });
+
+    it("does not fire haptics for a plain (non-justBooked) deep link", async () => {
+      const { haptics } = require("@/utils/haptics");
+      (getBookingByRef as jest.Mock).mockResolvedValue(mockBooking);
+      renderWithProviders(<LookupScreen initialRef="REF123" initialEmail="test@test.com" />);
+      await waitFor(() => expect(screen.getByText("Booking Found")).toBeTruthy());
+      expect(haptics.outcome).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * The booking is taller than the viewport, so the result column pins the way BookingDrawer
+   * does beside the locations list: capped at the scroller's visible height, scrolling inside.
+   */
+  describe("the result column beside the form", () => {
+    const onPlatform = async (os: string, body: () => Promise<void>) => {
+      const original = Platform.OS;
+      (Platform as unknown as { OS: string }).OS = os;
+      try {
+        await body();
+      } finally {
+        (Platform as unknown as { OS: string }).OS = original;
+      }
+    };
+
+    const renderFound = async () => {
+      (getBookingByRef as jest.Mock).mockResolvedValue(mockBooking);
+      (fetchVenueById as jest.Mock).mockResolvedValue(mockVenue);
+      renderWithProviders(
+        <LookupScreen initialRef="REF123" initialEmail="test@test.com" justBooked />
+      );
+      await waitFor(() => expect(screen.getByText("Booking Confirmed")).toBeTruthy());
+      fireEvent(screen.UNSAFE_getAllByType(ScrollView)[0], "layout", {
+        nativeEvent: { layout: { height: 900 } },
+      });
+    };
+
+    const columnStyle = () =>
+      StyleSheet.flatten(screen.getByTestId("lookup-result-column").props.style);
+
+    const rowStyle = () => StyleSheet.flatten(screen.getByTestId("lookup-columns").props.style);
+    const footerInScroller = () =>
+      within(screen.UNSAFE_getAllByType(ScrollView)[0]).queryByTestId("mock-footer") !== null;
+
+    it("pins on web, capped to the scroller it pins in", async () => {
+      await onPlatform("web", async () => {
+        await renderFound();
+        const style = columnStyle();
+        expect(style.position).toBe("sticky");
+        expect(style.overflowY).toBe("auto");
+        // The card, inside the shadow's room, clears the scroller's edge by the same margin at
+        // the top and the bottom.
+        const cardTop = style.top + style.padding;
+        expect(style.maxHeight - style.padding + style.top).toBe(900 - cardTop);
+      });
+    });
+
+    it("holds the row to a viewport's height on web, so the tallest column has room to pin", async () => {
+      await onPlatform("web", async () => {
+        await renderFound();
+        const cardTop = columnStyle().top + columnStyle().padding;
+        expect(rowStyle().minHeight).toBe(900 - cardTop);
+      });
+    });
+
+    it("leaves nothing after the row in the scroller on web, so reaching it cannot unpin the column", async () => {
+      await onPlatform("web", async () => {
+        await renderFound();
+        expect(screen.getByTestId("mock-footer")).toBeTruthy();
+        expect(footerInScroller()).toBe(false);
+        expect(screen.queryByTestId("scroll-to-top-rail")).toBeNull();
+      });
+    });
+
+    it("stays in the page's flow off web, where nothing can pin it", async () => {
+      await onPlatform("ios", async () => {
+        await renderFound();
+        const style = columnStyle();
+        expect(style.position).toBeUndefined();
+        expect(style.maxHeight).toBeUndefined();
+        expect(rowStyle().minHeight).toBeUndefined();
+        expect(footerInScroller()).toBe(true);
+      });
+    });
+  });
+
+  describe("recent bookings", () => {
+    it("renders cached bookings and triggers a lookup on press", async () => {
+      const mockCached = [
+        {
+          bookingRef: "CACHED1",
+          email: "cached@test.com",
+          venueName: "Cached Location",
+          date: "2026-01-01",
+          partySize: 4,
+        },
+        {
+          bookingRef: "CACHED2",
+          email: "second@test.com",
+          venueName: "Second Location",
+          date: "2026-03-03",
+          partySize: 2,
+        },
+      ];
+      (fetchCachedBookings as jest.Mock).mockResolvedValue(mockCached);
+      (getBookingByRef as jest.Mock).mockResolvedValue(mockBooking);
+
+      renderWithProviders(<LookupScreen />);
+
+      await waitFor(() => expect(screen.getByText("YOUR RECENT BOOKINGS")).toBeTruthy());
+      // The second row, so the press is doing the work rather than the auto-open that
+      // already took the first.
+      fireEvent.press(screen.getByText("CACHED2"));
+
+      expect(getBookingByRef).toHaveBeenCalledWith("CACHED2", "second@test.com");
+      await waitFor(() =>
+        expect(screen.getByPlaceholderText("e.g. swift-cedar-river").props.value).toBe("CACHED2")
+      );
+    });
+
+    it("keeps the recent-bookings list up while a result is showing, marking the open one", async () => {
+      const mockCached = [
+        {
+          bookingRef: "REF123",
+          email: "test@test.com",
+          venueName: "Cached Location",
+          date: "2026-01-01",
+          partySize: 4,
+        },
+        {
+          bookingRef: "OTHER9",
+          email: "test@test.com",
+          venueName: "Other Location",
+          date: "2026-02-02",
+          partySize: 2,
+        },
+      ];
+      (fetchCachedBookings as jest.Mock).mockResolvedValue(mockCached);
+      (getBookingByRef as jest.Mock).mockResolvedValue(mockBooking);
+
+      renderWithProviders(<LookupScreen />);
+      await waitFor(() => expect(screen.getByText("Booking Found")).toBeTruthy());
+      // The list stays put — the panel is a column over, not on top of it — so the guest
+      // can go straight to another booking without dismissing the result first.
+      expect(screen.getByText("YOUR RECENT BOOKINGS")).toBeTruthy();
+      expect(screen.getByText("OTHER9")).toBeTruthy();
+
+      const openRow = screen.getByLabelText("Look up booking REF123 at Cached Location");
+      expect(openRow.props.accessibilityState).toEqual({ selected: true });
+      const otherRow = screen.getByLabelText("Look up booking OTHER9 at Other Location");
+      expect(otherRow.props.accessibilityState).toEqual({ selected: false });
+    });
+  });
+
+  describe("opening the most recent booking on arrival", () => {
+    const twoCached = [
+      {
+        bookingRef: "REF123",
+        email: "test@test.com",
+        venueName: "Cached Location",
+        date: "2026-01-01",
+        partySize: 4,
+      },
+      {
+        bookingRef: "OTHER9",
+        email: "other@test.com",
+        venueName: "Other Location",
+        date: "2026-02-02",
+        partySize: 2,
+      },
+    ];
+
+    it("looks the first cached booking up and fills the form with it", async () => {
+      (fetchCachedBookings as jest.Mock).mockResolvedValue(twoCached);
+      (getBookingByRef as jest.Mock).mockResolvedValue(mockBooking);
+
+      renderWithProviders(<LookupScreen />);
+
+      await waitFor(() => expect(screen.getByText("Booking Found")).toBeTruthy());
+      expect(getBookingByRef).toHaveBeenCalledWith("REF123", "test@test.com");
+      expect(getBookingByRef).not.toHaveBeenCalledWith("OTHER9", "other@test.com");
+      expect(screen.getByPlaceholderText("e.g. swift-cedar-river").props.value).toBe("REF123");
+    });
+
+    it("stays idle when there is nothing cached", async () => {
+      (fetchCachedBookings as jest.Mock).mockResolvedValue([]);
+
+      renderWithProviders(<LookupScreen />);
+
+      await waitFor(() => expect(screen.getByText(IDLE_SCREEN)).toBeTruthy());
+      expect(getBookingByRef).not.toHaveBeenCalled();
+      expect(screen.queryByText("YOUR RECENT BOOKINGS")).toBeNull();
+    });
+
+    it("defers to a deep link rather than opening a cached booking over it", async () => {
+      (fetchCachedBookings as jest.Mock).mockResolvedValue(twoCached);
+      (getBookingByRef as jest.Mock).mockResolvedValue(mockBooking);
+
+      renderWithProviders(<LookupScreen initialRef="LINKED" initialEmail="linked@test.com" />);
+
+      await waitFor(() => expect(getBookingByRef).toHaveBeenCalled());
+      // The booking named in the URL is the only one looked up — a /booking-confirmation
+      // arrival must not be bumped off its own booking by whatever is in the cookie.
+      expect(getBookingByRef).toHaveBeenCalledWith("LINKED", "linked@test.com");
+      expect(getBookingByRef).toHaveBeenCalledTimes(1);
+      expect(screen.getByPlaceholderText("e.g. swift-cedar-river").props.value).toBe("LINKED");
+    });
+
+    it("stays out of the way on a phone, where the result would cover the form", async () => {
+      setWidth(400);
+      (fetchCachedBookings as jest.Mock).mockResolvedValue(twoCached);
+      (getBookingByRef as jest.Mock).mockResolvedValue(mockBooking);
+
+      renderWithProviders(<LookupScreen />);
+
+      await waitFor(() => expect(screen.getByText("YOUR RECENT BOOKINGS")).toBeTruthy());
+      expect(getBookingByRef).not.toHaveBeenCalled();
+    });
+
+    it("leaves a reference already being typed alone", async () => {
+      let release: (value: unknown) => void = () => {};
+      (fetchCachedBookings as jest.Mock).mockReturnValue(
+        new Promise((resolve) => {
+          release = resolve;
+        })
+      );
+
+      renderWithProviders(<LookupScreen />);
+      fireEvent.changeText(screen.getByPlaceholderText("e.g. swift-cedar-river"), "MY-OWN-REF");
+
+      release(twoCached);
+      await waitFor(() => expect(screen.getByText("YOUR RECENT BOOKINGS")).toBeTruthy());
+
+      expect(getBookingByRef).not.toHaveBeenCalled();
+      expect(screen.getByPlaceholderText("e.g. swift-cedar-river").props.value).toBe("MY-OWN-REF");
+    });
+  });
+
+  describe("waitlist tickets", () => {
+    const ticket = {
+      ref: "tkt-shore",
+      number: 7,
+      venueId: 5,
+      venueName: "Shore House",
+      name: "Ada",
+      partySize: 2,
+      status: "waiting",
+      partiesAhead: 1,
+      estimatedWaitMinutes: 15,
+      joinedAt: "2026-09-24T18:00:00Z",
+      notifiedAt: null,
+      pushEnabled: false,
+    };
+
+    beforeEach(() => {
+      (getWaitlistStatus as jest.Mock).mockResolvedValue(ticket);
+      (rememberWaitlistTicket as jest.Mock).mockReturnValue({ 5: "tkt-shore" });
+    });
+
+    it("shows a live ticket apart from the lookup, and no panel for it", async () => {
+      (readWaitlistTickets as jest.Mock).mockReturnValue({ 5: "tkt-shore" });
+
+      renderWithProviders(<LookupScreen />);
+
+      expect(await screen.findByTestId("waitlist-status-waiting")).toBeTruthy();
+      expect(screen.getByText("Shore House")).toBeTruthy();
+      expect(screen.queryByTestId("lookup-result-column")).toBeNull();
+      expect(
+        within(screen.getByTestId("lookup-columns")).queryByTestId("waitlist-status-waiting")
+      ).toBeNull();
+    });
+
+    it("shows no waitlist at all without a live ticket", async () => {
+      (readWaitlistTickets as jest.Mock).mockReturnValue({ 5: "tkt-shore" });
+      (getWaitlistStatus as jest.Mock).mockResolvedValue({ ...ticket, status: "inUse" });
+      (forgetWaitlistTicket as jest.Mock).mockReturnValue({});
+
+      renderWithProviders(<LookupScreen />);
+
+      await waitFor(() => expect(forgetWaitlistTicket).toHaveBeenCalledWith("tkt-shore"));
+      expect(screen.queryByTestId(/^waitlist-status-/)).toBeNull();
+      expect(screen.queryByText("Shore House")).toBeNull();
+    });
+
+    it("shows the email link's ticket, and keeps it on the device", async () => {
+      (fetchCachedBookings as jest.Mock).mockResolvedValue([
+        { bookingRef: "REF123", email: "test@test.com", date: "2026-01-01", partySize: 2 },
+      ]);
+
+      renderWithProviders(<LookupScreen initialTicketRef="tkt-shore" />);
+
+      expect(await screen.findByTestId("waitlist-status-waiting")).toBeTruthy();
+      await waitFor(() => expect(rememberWaitlistTicket).toHaveBeenCalledWith(5, "tkt-shore"));
+      await waitFor(() => expect(screen.getByText("YOUR RECENT BOOKINGS")).toBeTruthy());
+      // Arriving for the ticket, the page doesn't open a cached booking beside it.
+      expect(getBookingByRef).not.toHaveBeenCalled();
+    });
+
+    it("keeps the ticket up while a booking is looked up", async () => {
+      (readWaitlistTickets as jest.Mock).mockReturnValue({ 5: "tkt-shore" });
+      (getBookingByRef as jest.Mock).mockResolvedValue(mockBooking);
+      (fetchVenueById as jest.Mock).mockResolvedValue(mockVenue);
+
+      renderWithProviders(<LookupScreen />);
+      await screen.findByTestId("waitlist-status-waiting");
+
+      fireEvent.changeText(screen.getByPlaceholderText("e.g. swift-cedar-river"), "REF123");
+      fireEvent.changeText(screen.getByPlaceholderText("The email used when booking"), "t@t.com");
+      fireEvent.press(screen.getByLabelText("Find my booking"));
+
+      await waitFor(() => expect(screen.getByText("Booking Found")).toBeTruthy());
+      expect(screen.getByTestId("waitlist-status-waiting")).toBeTruthy();
+    });
+  });
+
+  describe("cancelling", () => {
+    beforeEach(() => {
+      (getBookingByRef as jest.Mock).mockResolvedValue(mockBooking);
+    });
+
+    async function lookUpABooking() {
+      renderWithProviders(<LookupScreen />);
+      fireEvent.changeText(screen.getByPlaceholderText("e.g. swift-cedar-river"), "REF123");
+      fireEvent.changeText(
+        screen.getByPlaceholderText("The email used when booking"),
+        "test@test.com"
+      );
+      fireEvent.press(screen.getByText("Look Up"));
+      await waitFor(() => expect(screen.getByText("Cancel This Booking")).toBeTruthy());
+    }
+
+    it("cancels the booking and updates the panel in place", async () => {
+      (cancelBookingByRef as jest.Mock).mockResolvedValue(true);
+      await lookUpABooking();
+
+      fireEvent.press(screen.getByText("Cancel This Booking"));
+      expect(await screen.findByTestId("confirm-modal")).toBeTruthy();
+      fireEvent.press(screen.getByText("Cancel Booking"));
+
+      await waitFor(() => expect(screen.getByText("Booking Cancelled")).toBeTruthy());
+      expect(screen.queryByText("Cancel This Booking")).toBeNull();
+      // Optimistic update, not a second network round trip.
+      expect(getBookingByRef).toHaveBeenCalledTimes(1);
+    });
+
+    it("dismissing the confirm modal does not cancel the booking", async () => {
+      await lookUpABooking();
+      fireEvent.press(screen.getByText("Cancel This Booking"));
+      expect(await screen.findByTestId("confirm-modal")).toBeTruthy();
+      fireEvent.press(screen.getByText("Keep Booking"));
+      await waitFor(() => expect(screen.queryByTestId("confirm-modal")).toBeNull());
+      expect(cancelBookingByRef).not.toHaveBeenCalled();
+      expect(screen.getByText("Cancel This Booking")).toBeTruthy();
+    });
+
+    it("shows an alert modal when cancellation fails", async () => {
+      (cancelBookingByRef as jest.Mock).mockRejectedValue(new Error("Failed to cancel booking."));
+      await lookUpABooking();
+
+      fireEvent.press(screen.getByText("Cancel This Booking"));
+      fireEvent.press(await screen.findByText("Cancel Booking"));
+
+      await waitFor(() => expect(screen.getByText("Failed to cancel booking.")).toBeTruthy());
+      expect(screen.getByText("Cancel This Booking")).toBeTruthy();
+    });
+  });
+
+  describe("compact layout", () => {
+    beforeEach(() => setWidth(400));
+
+    const lookUpOnACompactScreen = async () => {
+      (getBookingByRef as jest.Mock).mockResolvedValue(mockBooking);
+      (fetchVenueById as jest.Mock).mockResolvedValue(mockVenue);
+      renderWithProviders(<LookupScreen />);
+
+      fireEvent.changeText(screen.getByPlaceholderText("e.g. swift-cedar-river"), "REF123");
+      fireEvent.changeText(
+        screen.getByPlaceholderText("The email used when booking"),
+        "test@test.com"
+      );
+      fireEvent.press(screen.getByText("Look Up"));
+      await waitFor(() => expect(screen.getByText("Booking Found")).toBeTruthy());
+    };
+
+    it("shows the result as the platform's sheet instead of a side panel", async () => {
+      await lookUpOnACompactScreen();
+
+      expect(sheetProps().enablePanDownToClose).toBe(true);
+      expect(screen.queryByTestId("result-panel")).toBeNull();
+    });
+
+    it("dismissing the sheet lands back on the idle form", async () => {
+      await lookUpOnACompactScreen();
+
+      await act(async () => sheetProps().onDismiss());
+
+      expect(screen.queryByTestId("result-panel-body")).toBeNull();
+      expect(screen.getByText(IDLE_SCREEN)).toBeTruthy();
+    });
+  });
+
+  it("shows a loading skeleton in the panel column while a lookup is in flight", async () => {
+    let resolveLookup: (v: unknown) => void = () => {};
+    (getBookingByRef as jest.Mock).mockReturnValue(
+      new Promise((resolve) => {
+        resolveLookup = resolve;
+      })
+    );
+    renderWithProviders(<LookupScreen />);
+
+    fireEvent.changeText(screen.getByPlaceholderText("e.g. swift-cedar-river"), "REF123");
+    fireEvent.changeText(
+      screen.getByPlaceholderText("The email used when booking"),
+      "test@test.com"
+    );
+    fireEvent.press(screen.getByText("Look Up"));
+
+    await waitFor(() => expect(screen.getByLabelText("Loading booking")).toBeTruthy());
+    resolveLookup(mockBooking);
+    await waitFor(() => expect(screen.getByText("Booking Found")).toBeTruthy());
+  });
+
+  it("fires onScroll to track scrollY for the scroll-to-top FAB", () => {
+    renderWithProviders(<LookupScreen />);
+    const { ScrollView } = require("react-native");
+    const scrollViews = screen.UNSAFE_getAllByType(ScrollView);
+    fireEvent.scroll(scrollViews[0], scrollEvent(400));
+    expect(screen.getByText(IDLE_SCREEN)).toBeTruthy();
+  });
+});
